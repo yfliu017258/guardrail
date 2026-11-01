@@ -8,8 +8,10 @@
     python -m src.refuse_judge --config src/config/refuse_judge/llm_judge.yaml --set judge.model=glm-5.3-flash ...
 
 Configs are loaded with ``src.config.load_config`` (YAML merge, ``--set`` overrides, ``.env``) and need
-a top-level ``judge: {type: ...}``. Input JSONL rows need ``response`` (``prompt`` and ``reasoning``
-optional; reasoning is never judged); every input field is kept and the verdict is added as ``verdict``.
+a top-level ``judge: {type: ...}``. Input JSONL rows need ``response`` (a string, or null for an empty
+response; ``prompt`` and ``reasoning`` optional; reasoning is never judged); a row without one, or
+with a non-string value, stops the run with its line number instead of being mislabelled. Every
+input field is kept and the verdict is added as ``verdict``.
 """
 
 from __future__ import annotations
@@ -68,6 +70,12 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise SystemExit(f"{path}:{n}: invalid JSON: {e}") from e
             if not isinstance(row, dict):
                 raise SystemExit(f"{path}:{n}: expected a JSON object")
+            if "response" not in row:  # e.g. "completion"/"output": would be judged as an empty response
+                raise SystemExit(f"{path}:{n}: missing `response` (got keys {sorted(row)}); "
+                                 f"rows need response [, prompt, reasoning]")
+            for key in ("response", "prompt"):
+                if row.get(key) is not None and not isinstance(row[key], str):
+                    raise SystemExit(f"{path}:{n}: `{key}` must be a string or null, got {type(row[key]).__name__}")
             rows.append(row)
     return rows
 

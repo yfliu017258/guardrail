@@ -110,8 +110,11 @@ class LocalFileSource(BaseConverter):
 
 
 def read_records(path: Path) -> Iterator[Record]:
+    """Rows of a local export as plain Python values: parquet nulls (NaN / pd.NA) become ``None`` and numpy
+    scalars Python ones; CSV fields may be arbitrarily large (pasted documents in logs)."""
     suf = path.suffix.lower()
     if suf == ".csv":
+        csv.field_size_limit(1 << 30)  # default 128 KiB aborts the whole conversion on one long field
         with path.open(encoding="utf-8-sig", newline="") as f:  # utf-8-sig: Excel exports start with a BOM
             yield from csv.DictReader(f)
     elif suf == ".jsonl":
@@ -125,6 +128,7 @@ def read_records(path: Path) -> Iterator[Record]:
     elif suf == ".parquet":
         import pandas as pd
 
-        yield from pd.read_parquet(path).to_dict("records")
+        df = pd.read_parquet(path)
+        yield from df.astype(object).where(df.notna(), None).to_dict("records")
     else:
         raise ValueError(f"unsupported file type: {path}")

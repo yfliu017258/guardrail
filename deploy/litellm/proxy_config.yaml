@@ -36,7 +36,13 @@ guardrails:
       default_on: true
       unreachable_fallback: fail_open
       streaming_end_of_stream_only: false              # check every Nth chunk while streaming
-      # NOTE: on streamed output only BLOCKED takes effect; GUARDRAIL_INTERVENED (masking) is not applied
+      # Streaming: LiteLLM 1.92 yields the ORIGINAL chunk after each check, so GUARDRAIL_INTERVENED (masking)
+      # is ignored on streamed output and PII / keys reach the client verbatim; only BLOCKED stops the stream.
+      # If clients stream (most chat UIs do), set `response_mask_action: block` on the guard service's regex
+      # stage (src/config/server/*.yaml) so response-side mask rules block instead. Even then the chunks sent
+      # before the first sampled check (up to streaming_sampling_rate - 1) are already out; a lower rate
+      # shrinks that window at one guard call per checked chunk. `streaming_buffer_until_moderated` exists in
+      # 1.92's unified guardrail but is not wired into generic_guardrail_api's initializer — do not rely on it.
       streaming_sampling_rate: 5
 
   # shadow / A-B: a second service instance with a candidate model, opt-in per request

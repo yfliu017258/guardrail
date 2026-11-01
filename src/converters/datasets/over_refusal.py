@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, ClassVar
 
 from ...data_schema import InputType, RefusalLabel
@@ -20,6 +21,7 @@ class XSTest(HFDatasetSource, TextLabelConverter):
     default_splits = ("train",)
     text_field = "prompt"
     positive_values = frozenset({"unsafe"})
+    negative_values = frozenset({"safe"})
     NOTE_CATEGORY: ClassVar[dict[str, str]] = {"violence": "violence", "drugs": "crime", "privacy": "privacy_pii"}
 
     def categories(self, r: Record) -> list[str]:
@@ -33,9 +35,14 @@ class XSTest(HFDatasetSource, TextLabelConverter):
 class XSTestResponses(HFDatasetSource, PromptResponseConverter):
     """XSTest v2 completions of 5 models (GPT-4, Llama-2 x2, Mistral x2), each human-labelled full
     compliance / full refusal / partial refusal -> ``refusal_label``: the reference set for validating
-    refusal judges. ``label`` is the PROMPT's harm (``contrast_*`` types are the unsafe contrasts):
-    XSTest annotates refusal, not response harm, so do not use it for response-guard recall.
-    Only response rows by default — the prompts themselves are the ``xstest`` converter."""
+    refusal judges. Only response rows by default — the prompts themselves are the ``xstest`` converter.
+
+    XSTest annotates refusal, not response harm, so a response row's ``label`` is DERIVED (as the schema
+    requires, it describes the judged side, the response): ``unsafe`` iff the prompt is unsafe
+    (``contrast_*`` types) AND the model did not fully refuse (partial refusal or compliance); a refusal
+    of an unsafe prompt and any answer to a safe prompt are ``safe``. The prompt's own harm is kept in
+    ``meta.prompt_label`` and the rows carry ``meta.label_derived: true`` — use them for refusal judges,
+    and treat their harm label as weaker than a human response-harm annotation."""
 
     output_split = "test"
     hf_id = "natolambert/xstest-v2-copy"
@@ -60,14 +67,17 @@ class XSTestResponses(HFDatasetSource, PromptResponseConverter):
         return self._prompt_harm(r)
 
     def response_label(self, r: Record) -> str | None:
-        return self._prompt_harm(r)
+        refused = self.refusal_label(r) == "refusal"  # raises on an unknown final_label
+        return "unsafe" if self._prompt_harm(r) == "unsafe" and not refused else "safe"
 
     def categories(self, r: Record, side: InputType) -> list[str]:
         return [self.TYPE_CATEGORY[r["type"]]] if r["type"] in self.TYPE_CATEGORY else []
 
     def meta(self, r: Record, side: InputType) -> dict[str, Any]:
-        return {"id": r.get("id"), "type": r.get("type"), "model": self.current_split, "agreement": r.get("agreement"),
-                "annotation_1": r.get("annotation_1"), "annotation_2": r.get("annotation_2")}
+        meta = {"id": r.get("id"), "type": r.get("type"), "model": self.current_split, "agreement": r.get("agreement"),
+                "annotation_1": r.get("annotation_1"), "annotation_2": r.get("annotation_2"),
+                "prompt_label": self._prompt_harm(r)}
+        return {**meta, "label_derived": True} if side == "response" else meta
 
 
 @register("or_bench")
@@ -131,7 +141,9 @@ class RTPLX(HFFilesSource, PromptResponseConverter):
     Annotations are 1-5 means of 3 annotators per dimension; a row is unsafe when any dimension >= threshold.
     RealToxicityPrompts-style continuations (not chat requests) and skewed toxic -> report as its own slice.
     Options: ``locales: [ZH_Hant, ZH_Hans, EN]``, ``threshold: 3.0``, ``include_completions: true``.
-    Check the ZH_Hant rows are Taiwan (not HK) usage before relying on them."""
+    A side without numeric annotations has no ground truth: it is skipped (``skipped_request`` /
+    ``skipped_response``), never emitted as ``safe``. The language comes from the locale file, not
+    the detector. Check the ZH_Hant rows are Taiwan (not HK) usage before relying on them."""
 
     hf_id = "ToxicityPrompts/RTP-LX"
     license = "odc-by"
@@ -151,7 +163,11 @@ class RTPLX(HFFilesSource, PromptResponseConverter):
 
     def _scores(self, r: Record, side: InputType) -> dict[str, float]:
         ann = r.get(self.ANNOTATIONS[side]) or {}
-        return {str(k).lower(): v for k, v in ann.items() if isinstance(v, (int, float))}
+        return {str(k).lower(): v for k, v in ann.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and not math.isnan(v)}
+
+    def keep_side(self, r: Record, side: InputType) -> bool:
+        return bool(self._scores(r, side))  # unannotated -> no ground truth, not "safe"
 
     def _hits(self, r: Record, side: InputType) -> list[str]:
         thr = float(self.options.get("threshold", 3.0))

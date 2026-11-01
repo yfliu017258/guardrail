@@ -16,6 +16,7 @@ pipeline:
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: MediaTek-Research/Breeze-Guard-26
+      max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: granite_guardian            # same <score>yes|no</score> format
       parser_options: {criteria_id: tw_risk, criteria_category: crime}
       prompt_mode: chat_template

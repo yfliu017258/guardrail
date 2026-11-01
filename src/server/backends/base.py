@@ -15,6 +15,7 @@ A backend living outside this package registers itself on import; add its module
 from __future__ import annotations
 
 import abc
+import asyncio
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Literal
@@ -25,22 +26,38 @@ InputType = Literal["request", "response"]
 Message = dict[str, Any]  # OpenAI-style {"role": ..., "content": ...}
 
 
+#: What part of a LiteLLM request a ``GuardInput`` judges (``GuardPipeline.build_inputs``).
+#: ``turn``: the judged user / assistant turn; ``system``: client system / developer messages;
+#: ``tool_output``: tool / function results after the newest user turn; ``assistant``: assistant text
+#: after the newest user turn; ``tool_call``: a tool call's function name + arguments.
+Origin = Literal["turn", "system", "tool_output", "assistant", "tool_call"]
+
+
 @dataclass
 class GuardInput:
     """What one backend call judges.
 
     ``messages`` is the conversation context (OpenAI format). The *judged* turn is the
     last message: a ``user`` turn for ``request``, an ``assistant`` turn for ``response``.
-    ``texts`` are the raw strings LiteLLM sent; masking backends return a modified copy.
+    ``texts`` are the raw strings LiteLLM sent; masking backends return a modified copy. Only the
+    primary input of a request carries them; the extra inputs (system, tool output, tool calls) judge
+    text that is either already in ``texts`` or (tool calls) cannot be returned to LiteLLM at all.
     """
 
     input_type: InputType
     messages: list[Message]
     texts: list[str] = field(default_factory=list)
+    origin: Origin = "turn"
 
     @property
     def target_text(self) -> str:
         return _content_to_text(self.messages[-1].get("content")) if self.messages else ""
+
+    @property
+    def maskable(self) -> bool:
+        """False when a redaction could not be applied: LiteLLM 1.92 never copies tool calls back from the
+        guard response, so a mask hit in one must block instead."""
+        return self.origin != "tool_call"
 
 
 @dataclass
@@ -90,14 +107,32 @@ class GuardBackend(abc.ABC):
         t0 = time.perf_counter()
         try:
             v = await self._classify(inp)
-        except Exception as e:  # never let one backend crash the request; the pipeline applies on_error
+        except _PROPAGATE:
+            raise
+        except BaseException as e:  # noqa: BLE001 - never let one backend crash the request; on_error applies
+            # BaseException, not Exception: the Rust tokenizers raise pyo3 PanicException, which derives
+            # from BaseException (e.g. a pair window whose budget is below `stride`)
             v = Verdict(stage=self.name, unsafe=False, error=f"{type(e).__name__}: {e}")
         v.stage = self.name
         v.latency_ms = (time.perf_counter() - t0) * 1000
         return v
 
+    @property
+    def masks(self) -> bool:
+        """True when this backend may return ``masked_texts`` (``GuardPipeline`` allows one such live stage)."""
+        return False
+
+    @property
+    def type_name(self) -> str:
+        """Pre-registry spelling of ``registry_name``, kept for out-of-tree backends that read it."""
+        return self.registry_name
+
     def describe(self) -> dict[str, Any]:
         return {"name": self.name, "type": self.registry_name, "threshold": self.threshold}
+
+
+#: Not backend failures: shutdown, Ctrl-C and task cancellation (request timeouts) must propagate.
+_PROPAGATE = (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError)
 
 
 # --------------------------------------------------------------------------- #

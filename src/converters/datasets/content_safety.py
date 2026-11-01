@@ -21,7 +21,7 @@ from ...data_schema.taxonomy import (
 )
 from ..base import Record, register
 from ..sources import HFDatasetSource, HFFilesSource
-from ..templates import PromptResponseConverter, TextLabelConverter
+from ..templates import PromptResponseConverter, TextLabelConverter, is_missing
 
 
 # --------------------------------------------------------------------------- #
@@ -126,20 +126,47 @@ class WildGuardTest(HFDatasetSource, _WildGuardLike):
 @register("polyguard_prompts")
 class PolyGuardPrompts(HFDatasetSource, _WildGuardLike):
     """WildGuardTest translated to 17 languages (zh = Simplified MT). Options: ``languages: [Chinese, English]``.
-    Drops rows where the *translator* refused (prompt is a refusal) — they are mislabelled harmful."""
+
+    Machine-translation artefacts in the TRANSLATED rows are filtered (English rows are the original
+    WildGuardTest text and are never filtered — adversarial prompts often quote "I'm sorry, but I can't"):
+    a record whose prompt leaked the translator's tags or IS a translator refusal is dropped (it is
+    mislabelled harmful); a response sample is dropped (``skipped_response``, the request is kept) when it
+    leaked the tags, or reads as a refusal while labelled ``compliance`` — the translator refused, the
+    original response did not, and the refusal ground truth would be wrong."""
 
     hf_id = "ToxicityPrompts/PolyGuardPrompts"
     license = "cc-by-4.0"
     default_splits = ("test",)
-    REFUSAL_MARKERS: ClassVar[tuple[str, ...]] = (
-        "抱歉，我无法", "我无法满足", "I'm sorry, but I can't", "<SOURCE_TEXT>", "<TRANSLATION>")
+    ORIGINAL_LANGUAGE: ClassVar[str] = "English"
+    ARTEFACT_MARKERS: ClassVar[tuple[str, ...]] = ("<SOURCE_TEXT>", "</SOURCE_TEXT>", "<TRANSLATION>", "</TRANSLATION>")
+    REFUSAL_MARKERS: ClassVar[tuple[str, ...]] = ("抱歉，我无法", "我无法满足", "我无法翻译", "I'm sorry, but I can't",
+                                                  "I cannot translate", "I can't translate")
+    REFUSAL_WINDOW: ClassVar[int] = 30  # a translator refusal is the whole output: look at its start only
     LANG: ClassVar[dict[str, str]] = {"Chinese": "zh-CN", "English": "en"}
+
+    def _artefact(self, text: str) -> bool:
+        return any(m in text for m in self.ARTEFACT_MARKERS)
+
+    def _refusal(self, text: str) -> bool:
+        """The text STARTS with a translator refusal (a prompt that merely quotes one later is an attack)."""
+        head = text.strip().lstrip("\"'“「").replace("’", "'")[: self.REFUSAL_WINDOW]
+        return any(head.startswith(m) for m in self.REFUSAL_MARKERS)
 
     def keep(self, r: Record) -> bool:
         if r.get("language") not in self.options.get("languages", ["Chinese", "English"]):
             return False
+        if r.get("language") == self.ORIGINAL_LANGUAGE:
+            return True
         prompt = self.text(r, self.prompt_field)
-        return not any(m in prompt for m in self.REFUSAL_MARKERS)
+        return not (self._artefact(prompt) or self._refusal(prompt))
+
+    def keep_side(self, r: Record, side: InputType) -> bool:
+        if side == "request" or r.get("language") == self.ORIGINAL_LANGUAGE:
+            return True
+        response = self.text(r, self.response_field)
+        if self._artefact(response):
+            return False
+        return not (self._refusal(response) and r.get(self.refusal_field) == "compliance")
 
     def categories(self, r: Record, side: InputType) -> list[str]:
         column = "prompt_categories" if side == "request" else "response_categories"
@@ -185,8 +212,11 @@ class ToxicChat(HFDatasetSource, TextLabelConverter):
 
 @register("openai_moderation")
 class OpenAIModeration(HFDatasetSource, TextLabelConverter):
-    """OpenAI moderation eval set: one 0/1 column per category. ``keep_partial: false`` drops rows
-    where some category is unannotated."""
+    """OpenAI moderation eval set: one 0/1 column per category; a null flag means "not annotated"
+    (per the dataset README), never 0. A row is ``unsafe`` when any flag is 1 and ``safe`` only when
+    EVERY flag is annotated 0; a row with no 1 and some null flags has no ground truth and is
+    skipped. ``keep_partial: false`` also drops partially annotated unsafe rows. Unannotated
+    categories are listed in ``meta.unannotated``."""
 
     output_split = "test"
     hf_id = "mmathys/openai-moderation-api-evaluation"
@@ -198,8 +228,14 @@ class OpenAIModeration(HFDatasetSource, TextLabelConverter):
     def _flags(r: Record) -> dict[str, Any]:
         return {k: r.get(k.upper()) for k in OPENAI_MODERATION_MAP}
 
+    @classmethod
+    def _unannotated(cls, r: Record) -> list[str]:
+        return [k.upper() for k, v in cls._flags(r).items() if is_missing(v)]
+
     def keep(self, r: Record) -> bool:
-        return self.options.get("keep_partial", True) or all(v is not None for v in self._flags(r).values())
+        if not self._unannotated(r):
+            return True
+        return self.is_unsafe(r) and bool(self.options.get("keep_partial", True))
 
     def is_unsafe(self, r: Record) -> bool:
         return any(v == 1 for v in self._flags(r).values())
@@ -208,7 +244,8 @@ class OpenAIModeration(HFDatasetSource, TextLabelConverter):
         return map_categories([k for k, v in self._flags(r).items() if v == 1], OPENAI_MODERATION_MAP)
 
     def meta(self, r: Record) -> dict[str, Any]:
-        return {"flags": {k: v for k, v in self._flags(r).items() if v is not None}}
+        meta: dict[str, Any] = {"flags": {k: v for k, v in self._flags(r).items() if not is_missing(v)}}
+        return {**meta, "unannotated": self._unannotated(r)} if self._unannotated(r) else meta
 
 
 @register("beavertails")
@@ -238,12 +275,13 @@ class BeaverTails(HFDatasetSource, PromptResponseConverter):
 @register("chinesesafe")
 class ChineseSafe(HFDatasetSource, TextLabelConverter):
     """zh-CN binary set. ``政治错误`` rows are DROPPED (PRC political norms); noisy labels — sample & review.
-    License CC-BY-NC-4.0."""
+    ``违规`` is unsafe and any other non-empty label safe (``negative_values = None``). License CC-BY-NC-4.0."""
 
     hf_id = "SUSTech/ChineseSafe"
     license = "cc-by-nc-4.0"
     default_splits = ("test",)
     positive_values = frozenset({"违规"})
+    negative_values = None
     language = "zh-CN"
 
     def keep(self, r: Record) -> bool:

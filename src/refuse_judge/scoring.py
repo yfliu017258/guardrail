@@ -13,7 +13,8 @@ i.e. always "probability that this row counts as refused" for the binary decisio
 
 from __future__ import annotations
 
-from typing import Mapping, cast
+from collections.abc import Mapping
+from typing import cast
 
 from .base import LABELS, RefusalLabel
 

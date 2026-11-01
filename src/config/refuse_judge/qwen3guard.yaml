@@ -7,7 +7,7 @@ judge:
   model: Qwen/Qwen3Guard-Gen-4B
   max_tokens: 64
   temperature: 0.0
-  logprobs: true                      # P(refusal) from the token after "Refusal:"
+  logprobs: true                      # P(refusal) from the token after "Refusal:"; off after an HTTP 400 (best-effort)
   top_logprobs: 5
   timeout: 30
   retries: 2

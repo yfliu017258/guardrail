@@ -9,6 +9,7 @@ pipeline:
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: meta-llama/Llama-Guard-3-8B
+      max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: llama_guard
       prompt_mode: chat_template
       max_tokens: 16

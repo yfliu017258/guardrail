@@ -18,6 +18,8 @@ DEFAULT_KEYWORDS = {
 
 @BACKENDS.register("mock")
 class MockBackend(GuardBackend):
+    """Keyword matcher with a fake score (tests / CI / demos); ``delay_ms`` and ``fail_on`` simulate latency and errors."""
+
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)
         self.keywords: dict[str, list[str]] = cfg.get("keywords", DEFAULT_KEYWORDS)

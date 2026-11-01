@@ -13,7 +13,8 @@ Parsers are classes in the ``PARSERS`` registry, selected and configured by a gu
 Add a model family: subclass ``OutputParser``, implement ``_parse``, set the class-level knobs
 (``SCORE_SPEC``, ``CATEGORY_MAP``, ``OPTIONS`` ...) and decorate it with ``@PARSERS.register("name")``.
 The base already handles reasoning blocks, ``unparsable_as_unsafe``, ``category_map`` and
-``ignore_categories``, and rejects unknown options.
+``ignore_categories``, and rejects unknown options. Build verdicts with ``flagged`` / ``cleared`` /
+``unparsable`` so ignored categories behave the same in every family (they never block, score or not).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from itertools import accumulate
 from typing import Any, ClassVar, Iterable, Mapping
 
 from ...common import Registry
@@ -68,25 +70,40 @@ class ScoreSpec:
     def score(self, content_logprobs: list[dict[str, Any]] | None) -> float | None:
         """P(unsafe) from an OpenAI-style ``choices[0].logprobs.content`` list.
 
-        Walks generated tokens; at the first position where the text generated so far matches
+        Walks generated tokens; at the first position where the answer generated so far matches
         ``anchor`` and the top-k alternatives contain a label token, returns
         ``sum p(unsafe tokens) / (sum p(unsafe) + sum p(safe))``. ``None`` if not found (e.g. logprobs
         disabled) — the caller then falls back to the hard label. Anchoring matters: Qwen3Guard's
-        first token "Saf" (of "Safety:") must not be read as the label "Safe".
+        first token "Saf" (of "Safety:") must not be read as the label "Safe". Two kinds of position
+        are never the label:
+
+        * a sampled token that is only whitespace (Llama Guard's leading ``"\\n\\n"``, the ``" "`` an
+          o200k tokenizer emits after ``"violation":``) — anchors ending in ``\\s*$`` already match there,
+          and tiny label alternatives at that step would decide the score;
+        * anything inside a ``<think>`` block, which ``split_reasoning`` also keeps out of the verdict.
         """
         if not content_logprobs:
             return None
+        tokens = [str(pos.get("token") or "") for pos in content_logprobs]
+        starts = list(accumulate((len(t) for t in tokens), initial=0))
+        full = "".join(tokens)
+        lo, hi = _answer_span(full)
         anchor = re.compile(self.anchor + r"\Z", re.DOTALL)
-        so_far = ""
-        for pos in content_logprobs:
-            if anchor.search(so_far):
-                alts = pos.get("top_logprobs") or [{"token": pos.get("token", ""), "logprob": pos.get("logprob", 0.0)}]
+        for pos, tok, start in zip(content_logprobs, tokens, starts):
+            if start < lo or start >= hi or not tok.strip():
+                continue
+            if anchor.search(full[lo:start]):
+                # read the distribution only where the model actually emitted a label token; at any other
+                # anchored position (an opening quote, a markdown star) the label alternatives are tiny
+                # and would decide the score by noise
+                if not (_matches(tok, self.unsafe) or _matches(tok, self.safe)):
+                    continue
+                alts = pos.get("top_logprobs") or [{"token": tok, "logprob": pos.get("logprob", 0.0)}]
                 p_u = sum(math.exp(a["logprob"]) for a in alts if _matches(a["token"], self.unsafe))
                 p_s = sum(math.exp(a["logprob"]) for a in alts
                           if _matches(a["token"], self.safe) and not _matches(a["token"], self.unsafe))
                 if p_u + p_s > 0:
                     return p_u / (p_u + p_s)
-            so_far += pos.get("token", "")
         return None
 
 
@@ -117,6 +134,17 @@ def split_reasoning(text: str) -> tuple[str, str]:
     return answer, "\n".join(t for t in thinking if t)
 
 
+def _answer_span(text: str) -> tuple[int, int]:
+    """Character span of ``text`` outside reasoning, mirroring ``split_reasoning``: after the last
+    ``</think>`` (full blocks, or a block the chat template opened), or before an unterminated ``<think>``."""
+    low = text.lower()
+    if "</think>" in low:
+        return low.rindex("</think>") + len("</think>"), len(text)
+    if "<think>" in low:
+        return 0, low.index("<think>")
+    return 0, len(text)
+
+
 def _first_json(text: str) -> dict | None:
     for m in re.finditer(r"\{.*?\}", text, re.DOTALL):
         try:
@@ -131,10 +159,20 @@ def _first_json(text: str) -> dict | None:
 
 
 def _labels(value: Any, sep: str = r",") -> list[str]:
-    """Native labels from a comma-separated string or a JSON list (models emit both)."""
+    """Native labels from a comma-separated string or a JSON list (models emit both); never raises.
+
+    Free-form judges also emit a bare number (``"category": 3``), mixed lists or objects: everything is
+    coerced to strings, because a category-format problem must not turn a detected violation into an
+    error (which fails open).
+    """
     if not value:
         return []
-    items = re.split(sep, value) if isinstance(value, str) else [str(v) for v in value]
+    if isinstance(value, str):
+        items = re.split(sep, value)
+    elif isinstance(value, (list, tuple, set, dict)):
+        items = [str(v) for v in value if v is not None]
+    else:
+        items = [str(value)]
     return [c.strip() for c in items if c.strip()]
 
 
@@ -176,6 +214,8 @@ class OutputParser(abc.ABC):
         cmap = self.options.get("category_map") or self.CATEGORY_MAP
         self.category_map: dict[str, str] = {str(k).lower(): v for k, v in cmap.items()}
         ignore = self.options.get("ignore_categories")
+        if isinstance(ignore, str):  # one category, not its characters (that would drop the default silently)
+            ignore = [ignore]
         self.ignore_categories = {str(c).lower() for c in (self.DEFAULT_IGNORE if ignore is None else ignore)}
 
     @classmethod
@@ -220,10 +260,27 @@ class OutputParser(abc.ABC):
         extra = dict(extra or {})
         kept = [c for c in native if str(c).lower() not in self.ignore_categories]
         if native and not kept:
-            return ParsedOutput(unsafe=False, native_categories=native, label_overridden=True,
-                                extra={**extra, "ignored": native}, reason=reason)
+            return self._ignored(native, extra, reason)
         return ParsedOutput(unsafe=True, native_categories=native, categories=self.map_categories(kept) or ["other"],
                             extra=extra, reason=reason)
+
+    def cleared(self, native: list[str] | None = None, extra: dict[str, Any] | None = None,
+                reason: str = "") -> ParsedOutput:
+        """Safe verdict; the counterpart of ``flagged`` for a label the model (or an option) counts as safe.
+
+        A safe label can still name categories (Qwen3Guard "Controversial" in loose mode). When every one of
+        them is ignored, ``label_overridden`` is set as in ``flagged``: otherwise the logprob score — which
+        measures the label, not the categories — could still block content flagged only for ignored ones.
+        """
+        native = list(native or [])
+        if native and all(str(c).lower() in self.ignore_categories for c in native):
+            return self._ignored(native, dict(extra or {}), reason)
+        return ParsedOutput(unsafe=False, native_categories=native, extra=dict(extra or {}), reason=reason)
+
+    @staticmethod
+    def _ignored(native: list[str], extra: dict[str, Any], reason: str) -> ParsedOutput:
+        return ParsedOutput(unsafe=False, native_categories=native, label_overridden=True,
+                            extra={**extra, "ignored": native}, reason=reason)
 
 
 PARSERS: Registry[OutputParser] = Registry("guard output parser", base=OutputParser)
@@ -246,7 +303,7 @@ class LlamaGuardParser(OutputParser):
             return self.unparsable("empty output")
         head = lines[0].lower()
         if head.startswith("safe"):
-            return ParsedOutput(unsafe=False)
+            return self.cleared()
         if head.startswith("unsafe"):
             return self.flagged(re.findall(r"S\d{1,2}", " ".join(lines[1:])))
         return self.unparsable(f"unparsable: {head[:50]}")
@@ -270,9 +327,11 @@ class Qwen3GuardParser(OutputParser):
         self.controversial_as_unsafe = bool(self.options.get("controversial_as_unsafe", True))
 
     def score_spec(self, input_type: InputType = "request") -> ScoreSpec:
-        # "Controversial" mass only counts toward unsafe when the hard label would count it too
-        unsafe = ("unsafe", "controversial") if self.controversial_as_unsafe else ("unsafe",)
-        return ScoreSpec(anchor=r"Safety:\s*$", unsafe=unsafe, safe=("safe",))
+        # "Controversial" mass goes to the side the hard label puts it on, so the score measures the same
+        # decision (loose mode: Controversial is allowed, i.e. safe — dropping it would inflate P(unsafe))
+        if self.controversial_as_unsafe:
+            return ScoreSpec(anchor=r"Safety:\s*$", unsafe=("unsafe", "controversial"), safe=("safe",))
+        return ScoreSpec(anchor=r"Safety:\s*$", unsafe=("unsafe",), safe=("safe", "controversial"))
 
     def _parse(self, answer: str, input_type: InputType) -> ParsedOutput:
         m = re.search(r"Safety:\s*(Safe|Unsafe|Controversial)", answer, re.IGNORECASE)
@@ -285,7 +344,7 @@ class Qwen3GuardParser(OutputParser):
         extra = {"level": level, **({"refusal": refusal.group(1).lower()} if refusal else {})}
         if level == "unsafe" or (level == "controversial" and self.controversial_as_unsafe):
             return self.flagged(native, extra)
-        return ParsedOutput(unsafe=False, native_categories=native, extra=extra)
+        return self.cleared(native, extra)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +370,7 @@ class GraniteGuardianParser(OutputParser):
         if word not in ("yes", "no"):
             return self.unparsable("no <score>")
         if word == "no":
-            return ParsedOutput(unsafe=False)
+            return self.cleared()
         return ParsedOutput(unsafe=True, native_categories=[self.criteria_id], categories=[self.criteria_category])
 
 
@@ -334,7 +393,7 @@ class WildGuardParser(OutputParser):
         if val is None:
             return self.unparsable("field missing")
         extra = {"refusal": self._field(answer, "Response refusal")}
-        return self.flagged([], extra) if val == "yes" else ParsedOutput(unsafe=False, extra=extra)
+        return self.flagged([], extra) if val == "yes" else self.cleared(extra=extra)
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +407,7 @@ class _AegisParser(OutputParser):
     SAFETY_FIELD: ClassVar[dict[str, str]] = {"request": "User Safety", "response": "Response Safety"}
 
     def verdict(self, unsafe: bool, native: list[str]) -> ParsedOutput:
-        return self.flagged(native) if unsafe else ParsedOutput(unsafe=False, native_categories=native)
+        return self.flagged(native) if unsafe else self.cleared(native)
 
 
 @PARSERS.register("nemotron")
@@ -399,7 +458,7 @@ class AprielGuardParser(OutputParser):
         if not m:
             return self.unparsable("no verdict")
         codes = [c for c in m.group(2).split(",") if c]
-        out = self.flagged(codes) if m.group(1).lower() == "unsafe" else ParsedOutput(unsafe=False, native_categories=codes)
+        out = self.flagged(codes) if m.group(1).lower() == "unsafe" else self.cleared(codes)
         adversarial = m.group(3).lower() == "adversarial"
         # adversarial-ness is a property of the request; a response is not "a jailbreak". The logprob
         # score only measures the harmful label, so it must not overturn an adversarial flag.
@@ -420,8 +479,12 @@ class JSONPolicyParser(OutputParser):
     """Policy-as-prompt judges: ``{"violation": 0|1, "categories": [..], "rationale": ".."}`` (or a bare 0/1)."""
 
     OPTIONS = OutputParser.OPTIONS | TAXONOMY_OPTIONS | {"allowed_categories"}
-    SCORE_SPEC = ScoreSpec(anchor=r"\"violation\"\s*:\s*$", unsafe=("1", "true"), safe=("0", "false"))
+    SCORE_SPEC = ScoreSpec(anchor=r"\"violation\"\s*:\s*\"?\s*$", unsafe=("1", "true"), safe=("0", "false"))
     _UNSAFE_VALUES: ClassVar[tuple[Any, ...]] = (1, True, "1", "true", "True", "yes", "unsafe")
+    # off-format answer: a bare leading 0/1, or a "violation: 1"-style field — not any digit in prose
+    # ("falls under section 1.2 but is allowed" is not a violation)
+    # "1", "1.", "1. The request...", "Violation: 1", "**Violation:** 1" -> verdict; "1.2" / "10" are not
+    _FREE_TEXT = re.compile(r"^\W*([01])(?!\w)(?!\.\d)|\bviolation\b\W{0,8}([01])(?!\w)(?!\.\d)", re.IGNORECASE)
 
     def __init__(self, options: Mapping[str, Any] | None = None):
         super().__init__(options)
@@ -439,16 +502,15 @@ class JSONPolicyParser(OutputParser):
     def _parse(self, answer: str, input_type: InputType) -> ParsedOutput:
         obj = _first_json(answer)
         if obj is None:
-            m = re.search(r"\b([01])\b", answer)
+            m = self._FREE_TEXT.search(answer)
             if not m:
                 return self.unparsable("no JSON/0/1")
-            return self.flagged([]) if m.group(1) == "1" else ParsedOutput(unsafe=False)
-        v = obj.get("violation", obj.get("unsafe", obj.get("flagged")))
+            return self.flagged([]) if (m.group(1) or m.group(2)) == "1" else self.cleared()
+        # the verdict first: nothing about the categories' format may drop a detected violation
+        unsafe = obj.get("violation", obj.get("unsafe", obj.get("flagged"))) in self._UNSAFE_VALUES
         native = _labels(obj.get("categories") or obj.get("policy_category") or obj.get("category"))
         reason = str(obj.get("rationale", ""))[:500]
-        if v in self._UNSAFE_VALUES:
-            return self.flagged(native, reason=reason)
-        return ParsedOutput(unsafe=False, native_categories=native, reason=reason)
+        return self.flagged(native, reason=reason) if unsafe else self.cleared(native, reason=reason)
 
 
 # --------------------------------------------------------------------------- #
@@ -474,4 +536,4 @@ class YesNoParser(OutputParser):
         if w not in ("yes", "no"):
             return self.unparsable("not yes/no")
         unsafe = (w == "yes") == self.yes_means_unsafe
-        return ParsedOutput(unsafe=unsafe, categories=[self.criteria_category] if unsafe else [])
+        return ParsedOutput(unsafe=True, categories=[self.criteria_category]) if unsafe else self.cleared()

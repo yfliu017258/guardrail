@@ -8,26 +8,49 @@ respect to injection, so do not mix them into content-safety recall numbers.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, ClassVar
 
+from ...data_schema.schema import ZH_LANGUAGES, detect_language, normalize_language
 from ...data_schema.taxonomy import HARMBENCH_MAP, JBB_MAP
 from ..base import Record, register
 from ..sources import HFDatasetSource, MultiConfigHFSource
 from ..templates import SafeOnlyConverter, TextLabelConverter, UnsafeOnlyConverter
 
+log = logging.getLogger("converters")
+
 
 @register("pi_eval_suite")
 class PIEvalSuite(MultiConfigHFSource, TextLabelConverter):
     """Horizon-Labs/prompt-injection-eval-suite: 16 configs, unified schema (text, label, source, kind, lang).
-    Option ``configs`` picks subsets; ``synthetic_*`` are in-distribution for the publisher's own model."""
+    Option ``configs`` picks subsets; ``synthetic_*`` are in-distribution for the publisher's own model.
+
+    Labels are on the INJECTION axis only (1 = injection / jailbreak, 0 = everything else, including
+    plain harmful requests). The suite's ``xstest``, ``orbench_hard`` and ``notinject`` configs are
+    therefore NOT in ``default_configs``: their rows are all label 0 here, while our dedicated
+    ``xstest`` / ``or_bench`` / ``notinject`` converters label the same texts on the content-safety
+    axis (XSTest's 200 contrast prompts and OR-Bench-toxic are ``unsafe`` there). With both in one mix
+    (core_v1) the same prompt appeared as safe AND unsafe under different sample_ids, so a guard that
+    blocks it scored a TP and an FP at once. They stay available through ``options.configs`` for an
+    injection-only eval. ``lang`` is the dataset's own code (``de`` -> ``other``, raw code in
+    ``meta.orig_lang``); only rows without one are detected."""
 
     hf_id = "Horizon-Labs/prompt-injection-eval-suite"
     license = "mixed (per config: MIT / Apache-2.0 / CC-BY-4.0 / CC-BY-SA-4.0)"
     default_splits = ("test",)
-    default_configs = ("notinject", "xstest", "orbench_hard", "deepset_test", "jackhhao_test", "boundary_pairs_test",
-                       "neuralchemy_test", "bipia", "piarena", "llmail_phase2")
+    default_configs = ("deepset_test", "jackhhao_test", "boundary_pairs_test", "neuralchemy_test", "bipia", "piarena",
+                       "llmail_phase2")
+    CONTENT_SAFETY_OVERLAP: ClassVar[frozenset[str]] = frozenset({"xstest", "orbench_hard", "notinject"})
     skip_blank_text = True
     JAILBREAK_CONFIGS: ClassVar[frozenset[str]] = frozenset({"jackhhao_test", "simsonsun_jailbreaks"})
+
+    def configs(self) -> list[str]:
+        configs = super().configs()
+        if overlap := sorted(self.CONTENT_SAFETY_OVERLAP & set(configs)):
+            log.warning("%s: configs %s carry injection-axis labels (their unsafe-looking prompts are label 0); "
+                        "keep them out of mixes that also use the xstest / or_bench / notinject converters",
+                        self.name, overlap)
+        return configs
 
     @staticmethod
     def _source(r: Record) -> str:
@@ -47,10 +70,17 @@ class PIEvalSuite(MultiConfigHFSource, TextLabelConverter):
         return "jailbreak" if self._is_jailbreak(r) else "direct"
 
     def lang(self, r: Record) -> str:
-        return r["lang"] if r.get("lang") in ("en", "zh-TW", "zh-CN") else "auto"
+        code = normalize_language(r.get("lang"))
+        if code is None:
+            return "auto"
+        if code == "zh":  # Chinese of unstated script: let the detector pick zh-TW / zh-CN when it can
+            detected = detect_language(self.text(r))
+            return detected if detected in ZH_LANGUAGES else code
+        return code
 
     def meta(self, r: Record) -> dict[str, Any]:
-        return {"config": r["_config"], "source": self._source(r), "kind": r.get("kind") or "direct"}
+        return {"config": r["_config"], "source": self._source(r), "kind": r.get("kind") or "direct",
+                "orig_lang": r.get("lang")}
 
 
 @register("notinject")
@@ -133,6 +163,7 @@ class JackhhaoJailbreak(HFDatasetSource, TextLabelConverter):
     text_field = "prompt"
     label_field = "type"
     positive_values = frozenset({"jailbreak"})
+    negative_values = frozenset({"benign"})
     category = "jailbreak"
     attack_type = "jailbreak"
 
@@ -140,7 +171,9 @@ class JackhhaoJailbreak(HFDatasetSource, TextLabelConverter):
 @register("in_the_wild_jailbreak")
 class InTheWildJailbreak(MultiConfigHFSource, TextLabelConverter):
     """TrustAIRLab: jailbreak_* configs -> unsafe, regular_* -> safe role-play hard negatives. Dedupe advised.
-    Option ``date`` picks the snapshot (config suffix)."""
+    Option ``date`` picks the snapshot (config suffix). Cap the size with ``sample: {n, seed}`` (seeded,
+    label-stratified), NOT ``limit``: jailbreak_* is read first, so ``limit`` keeps every jailbreak plus
+    the first regular rows in file order (~47% unsafe instead of the source's ~9%)."""
 
     output_split = "test"
     hf_id = "TrustAIRLab/in-the-wild-jailbreak-prompts"

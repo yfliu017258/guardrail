@@ -15,6 +15,8 @@ from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 
 @BACKENDS.register("hf_classifier")
 class HFClassifierBackend(GuardBackend):
+    """Local HF sequence classifier (Prompt Guard 2, injection / content-safety heads); max score over token windows."""
+
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)
         self.model_id = cfg["model"]
@@ -36,6 +38,7 @@ class HFClassifierBackend(GuardBackend):
         self.category = cfg.get("category", "prompt_injection")
         self._model = self._tok = None
         self._unsafe_ids: list[int] = []
+        self._pair_prompt_tokens = 0  # set by _init_pair_budget once the tokenizer is loaded
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
@@ -56,6 +59,32 @@ class HFClassifierBackend(GuardBackend):
         if not self._unsafe_ids:
             raise ValueError(f"{self.model_id}: none of {self.unsafe_labels} in id2label={id2label}; set unsafe_label_ids")
         self._cat_ids = {i: self.category_labels[lbl] for i, lbl in id2label.items() if lbl in self.category_labels}
+        self._init_pair_budget()
+
+    def _init_pair_budget(self) -> None:
+        """Prompt tokens a (prompt, response) window may hold: at most half the window, and always leaving
+        more than ``stride`` tokens for the response. Otherwise the fast tokenizer panics (``stride`` must be
+        strictly less than the room left — a pyo3 ``PanicException``, not an ``Exception``) or, for longer
+        prompts, raises "Sequence to truncate too short"; and a response window of ``stride + 1`` tokens
+        would advance one token per window."""
+        assert self._tok is not None
+        room = self.max_length - self._tok.num_special_tokens_to_add(pair=True)
+        self._pair_prompt_tokens = min(room // 2, room - self.stride - 1)
+        if self.pair_response and self._pair_prompt_tokens < 1:
+            raise ValueError(f"stage {self.name!r}: stride={self.stride} leaves no room for the prompt in a "
+                             f"max_length={self.max_length} pair window; lower stride")
+
+    def _fit_pair_prompt(self, prompt: str) -> str:
+        """The prompt's last ``_pair_prompt_tokens`` tokens (the end of the prompt is what the response answers)."""
+        assert self._tok is not None
+        keep = self._pair_prompt_tokens
+        for _ in range(3):  # decode -> encode round trips can shift the count by a few tokens
+            ids = self._tok(prompt, add_special_tokens=False)["input_ids"]
+            if len(ids) <= self._pair_prompt_tokens:
+                return prompt
+            prompt = self._tok.decode(ids[-keep:], skip_special_tokens=True)
+            keep = max(1, keep - 8)
+        return ""
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "model": self.model_id, "category": self.category}
@@ -64,6 +93,8 @@ class HFClassifierBackend(GuardBackend):
         import torch
 
         assert self._tok is not None and self._model is not None
+        if pair is not None:
+            text = self._fit_pair_prompt(text)
         enc = self._tok(
             text, pair, truncation="only_second" if pair else True, max_length=self.max_length, stride=self.stride,
             return_overflowing_tokens=True, padding=True, return_tensors="pt",

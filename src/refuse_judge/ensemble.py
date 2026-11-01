@@ -27,15 +27,21 @@ from .base import LABELS, REFUSAL_JUDGES, RefusalJudge, RefusalVerdict, build_ju
 log = logging.getLogger("refuse_judge")
 
 
-def resolve_judge_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    """``{judge_config: file.yaml, **inline}`` -> the file's top-level ``judge:`` merged with ``inline``."""
+def resolve_judge_cfg(cfg: dict[str, Any], _stack: tuple[str, ...] = ()) -> dict[str, Any]:
+    """``{judge_config: file.yaml, **inline}`` -> the file's top-level ``judge:`` merged with ``inline``.
+
+    Recursive: the file's ``judge:`` may itself be ``{judge_config: other.yaml, ...}`` (a variant of
+    a shipped config); the outermost inline keys win. A reference cycle raises ``ValueError``."""
     if "judge_config" not in cfg:
         return dict(cfg)
+    ref = str(cfg["judge_config"])  # each file's reference text is fixed, so a cycle repeats a string
+    if ref in _stack:
+        raise ValueError(f"circular judge_config reference: {' -> '.join([*_stack, ref])}")
     inline = {k: v for k, v in cfg.items() if k != "judge_config"}
-    base = load_yaml(cfg["judge_config"]).get("judge")
+    base = load_yaml(ref).get("judge")
     if not isinstance(base, dict):
-        raise TypeError(f"{cfg['judge_config']}: needs a top-level `judge:` mapping")
-    return deep_merge(base, inline)
+        raise TypeError(f"{ref}: needs a top-level `judge:` mapping")
+    return deep_merge(resolve_judge_cfg(base, (*_stack, ref)), inline)
 
 
 class CompositeJudge(RefusalJudge):

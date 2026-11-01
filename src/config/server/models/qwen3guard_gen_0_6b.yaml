@@ -11,6 +11,7 @@ pipeline:
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: Qwen/Qwen3Guard-Gen-0.6B
+      max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: qwen3guard
       parser_options: {controversial_as_unsafe: true, ignore_categories: ["Politically Sensitive Topics"]}
       prompt_mode: chat_template      # no system prompt; the chat template embeds the policy

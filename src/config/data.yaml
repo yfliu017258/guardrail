@@ -19,16 +19,24 @@ datasets:
   chinesesafe: {enabled: false}                              # CC-BY-NC-4.0, noisy; political subject auto-dropped
 
   # ---------------- prompt injection / jailbreak ----------------
-  pi_eval_suite: {}                                          # over-defense + direct + indirect, unified schema
+  # Injection-axis labels only (label 0 = "not an injection", incl. plain harmful requests). Its xstest /
+  # orbench_hard / notinject configs are NOT in the class defaults: they contradict the content-safety labels
+  # of our xstest / or_bench / notinject converters (same prompt safe here, unsafe there -> TP + FP in core_v1).
+  # Add them with `configs: [...]` only for an injection-only eval that does not also contain those converters.
+  pi_eval_suite: {}                                          # direct + jailbreak + indirect (deepset/jackhhao/boundary/neuralchemy/bipia/piarena/llmail)
   boundary_pairs: {}                                         # benign/attack minimal pairs
   notinject: {}                                              # over-defense FPR
-  in_the_wild_jailbreak: {date: "2023_12_25", limit: 3000}
+  # `sample` = seeded, label-stratified (keeps the ~9% jailbreak base rate). Not `limit`: it stops after N rows,
+  # i.e. every jailbreak_* row + the first regular_* rows in file order. `strategy: balanced` keeps all ~1.4k jailbreaks.
+  in_the_wild_jailbreak: {date: "2023_12_25", sample: {n: 3000, seed: 42, strategy: stratified}}
   jbb_behaviors: {}
   harmbench: {}
 
   # ---------------- over-refusal / multilingual ----------------
   xstest: {}
-  xstest_responses: {}                                       # 5 models x 450 human refusal labels -> validates refusal judges (label = prompt harm)
+  # 5 models x 450 human refusal labels -> validates refusal judges. label is DERIVED for the response:
+  # unsafe iff the prompt is unsafe (contrast_*) and the model did not fully refuse; prompt harm in meta.prompt_label.
+  xstest_responses: {}
   or_bench: {}
   multijail_zhtw: {converter: multijail, languages: [zh], opencc: s2twp}
   rtp_lx: {locales: [ZH_Hant, ZH_Hans, EN], threshold: 3.0}  # ODC-BY; NATIVE zh-TW (ZH_Hant)
@@ -53,6 +61,8 @@ datasets:
     columns: {prompt: input, label: human_label, category: reason}
 
 # Frozen evaluation mixes. Bump the version instead of editing a released mix.
+# core_v1's pi_eval_suite part no longer contains the suite's xstest / orbench_hard / notinject configs (see above):
+# xstest, or_bench and notinject enter only through their own converters, with content-safety labels.
 mixes:
   core_v1:
     seed: 42

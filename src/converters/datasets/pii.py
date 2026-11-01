@@ -54,12 +54,20 @@ class TwPIIBench(HFDatasetSource, _SpanPIIConverter):
 @register("seatbelt_pii_heldout")
 class SeatbeltPIIHeldout(HFFilesSource, _SpanPIIConverter):
     """cjhwong/seatbelt-pii-tagger-data held-out files (zh-Hant / zh-Hans / en + regex-generated secrets).
-    Viewer is broken -> files loaded directly. Option ``files`` overrides the default held-out files."""
+    Viewer is broken -> files loaded directly, ONE ``load_dataset`` per file: the rule_secrets file has an
+    extra ``rule`` column, and one multi-file split is cast to the first file's columns (CastError).
+    Option ``files`` overrides the default held-out files; rows are tagged ``_file`` (-> ``meta.file``)."""
 
     hf_id = "cjhwong/seatbelt-pii-tagger-data"
     license = "apache-2.0"
     default_splits = ("test",)
-    data_files = ("synthetic/heldout.jsonl", "synthetic/rule_secrets/heldout.jsonl")
+    data_files = ("{file}",)
+    group_key = "file"
+    group_option = "files"
+    default_groups = ("synthetic/heldout.jsonl", "synthetic/rule_secrets/heldout.jsonl")
+
+    def files_for(self, split: str, group: str | None) -> list[str]:
+        return [str(group)]  # ``options.files`` lists the groups here, it does not replace the pattern
 
     def meta(self, r: Record) -> dict[str, Any]:
-        return {"labels": self.span_labels(r), "rule": r.get("rule"), "script": r.get("script")}
+        return {"labels": self.span_labels(r), "rule": r.get("rule"), "script": r.get("script"), "file": r.get("_file")}

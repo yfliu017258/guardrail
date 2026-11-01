@@ -12,7 +12,8 @@
 | 內容安全（zh-CN + en，含 response/refusal） | `ToxicityPrompts/PolyGuardPrompts` test | `polyguard_prompts` | CC-BY-4.0 ✅ | 會過濾「翻譯器拒答」被誤標成 harmful 的列 |
 | 內容安全（en，最佳 response/refusal） | `allenai/wildguardmix` (WildGuardTest 1,725) | `wildguardtest` | ODC-BY，**gated** | 取得權限後確認 config 名稱 |
 | 真實流量 FPR | `lmsys/toxic-chat` toxicchat0124 | `toxic_chat` | **CC-BY-NC** ⚠️ | 預設關閉，需法務確認 |
-| Prompt injection（一站式） | `Horizon-Labs/prompt-injection-eval-suite`（16 configs） | `pi_eval_suite` | 各 config 不同 | 含 over-defense、direct、indirect（BIPIA / PIArena / LLMail）；`synthetic_*` 是發布者自家分佈 |
+| Prompt injection（一站式） | `Horizon-Labs/prompt-injection-eval-suite`（16 configs） | `pi_eval_suite` | 各 config 不同 | 含 direct、indirect（BIPIA / PIArena / LLMail）；`synthetic_*` 是發布者自家分佈。**預設不載入 `notinject` / `xstest` / `orbench_hard`**：它們是以 injection 為軸的標籤（有害但沒有 override 的請求 = 0），和我們專用的 content-safety converter 互相矛盾；mix 的 manifest 會列出 `label_conflicts` |
+| **拒答 judge 驗證** | `natolambert/xstest-v2-copy`（5 個模型 × 450 筆回覆，人工 `final_label`） | `xstest_responses` | CC-BY-4.0（prompts） | `refusal_label` = refusal / partial / compliance；`label` 是推導出的回覆有害性（prompt 有害且沒有完全拒答），原始 prompt 標籤存在 `meta.prompt_label` |
 | Injection 邊界對 | `3nesdeniz/agentic-prompt-injection-boundary-pairs` | `boundary_pairs` | CC-BY-4.0 | 同詞彙的 benign/attack 成對 → 測關鍵字誤擋 |
 | Over-defense | `leolee99/NotInject`（339） | `notinject` | MIT | 全部 safe，量 FPR |
 | Jailbreak（in-the-wild） | `TrustAIRLab/in-the-wild-jailbreak-prompts` | `in_the_wild_jailbreak` | MIT | regular_* 可當 role-play hard negative；需去重 |

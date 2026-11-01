@@ -1,7 +1,9 @@
 """Guard components: output parsers (``PARSERS``), prompt builders (``PROMPT_BUILDERS``), backend registry."""
 
 import json
+import logging
 import math
+from itertools import pairwise
 
 import httpx
 import pytest
@@ -138,8 +140,8 @@ def test_logprob_score_qwen_anchor():
     lp = [_tok("Saf", [("Saf", 0.9), ("Uns", 0.1)]), _tok("ety", [("ety", 1.0)]), _tok(":", [(":", 1.0)]),
           _tok(" Safe", [(" Safe", 0.8), (" Unsafe", 0.15), (" Controversial", 0.05)])]
     assert abs(parser("qwen3guard").score(lp) - 0.2) < 1e-6
-    # controversial mass only counts as unsafe when the hard label counts it too
-    assert abs(parser("qwen3guard", controversial_as_unsafe=False).score(lp) - 0.15 / 0.95) < 1e-6
+    # controversial mass goes to the side the hard label puts it on (loose mode: safe)
+    assert abs(parser("qwen3guard", controversial_as_unsafe=False).score(lp) - 0.15) < 1e-6
 
 
 def test_logprob_score_depends_on_side_and_options():
@@ -307,3 +309,327 @@ async def test_retries_transient_server_errors():
 
     v = await _serve(flaky, retries=1, logprobs=False).classify(REQ)
     assert v.error is None and v.unsafe is False and len(calls) == 2
+
+
+async def test_score_cannot_undo_an_ignored_llama_guard_category():
+    lp = [_tok("unsafe", [("unsafe", 0.9), ("safe", 0.1)]), _tok("\n", [("\n", 1.0)]), _tok("S13", [("S13", 1.0)])]
+    v = await _serve(lambda r: _chat("unsafe\nS13", lp), parser_options={"ignore_categories": ["S13"]}).classify(REQ)
+    assert v.unsafe is False and v.score == 0.0 and abs(v.extra["label_score"] - 0.9) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# review findings: scoring
+# --------------------------------------------------------------------------- #
+def test_score_skips_whitespace_positions():
+    # Llama Guard emits "\n\n" first: the anchor ^\s*$ already matches there, but the label comes one step later
+    tiny_unsafe = [_tok("\n\n", [("\n\n", 0.9999), ("\n", 5e-5), ("unsafe", 3e-7), ("safe", 1e-8)]),
+                   _tok("safe", [("safe", 0.995), ("unsafe", 0.005)])]
+    assert abs(parser("llama_guard").score(tiny_unsafe) - 0.005) < 1e-6
+    lone_safe = [_tok("\n\n", [("\n\n", 0.99), ("safe", 0.01)]), _tok("unsafe", [("unsafe", 0.99), ("safe", 0.01)])]
+    assert abs(parser("llama_guard").score(lone_safe) - 0.99) < 1e-6
+    lone_unsafe = [_tok("\n\n", [("\n\n", 0.99), ("unsafe", 0.01)]), _tok("safe", [("safe", 0.98), ("unsafe", 0.02)])]
+    assert abs(parser("llama_guard").score(lone_unsafe) - 0.02) < 1e-6
+    # o200k / cl100k style: '":' then ' ' then '0'
+    js = [_tok(t, [(t, 1.0)]) for t in ('{"', "violation")] + [_tok('":', [('":', 1.0)]),
+          _tok(" ", [(" ", 0.99), (" 1", 6e-6), (" 0", 1e-6)]), _tok("0", [("0", 0.98), ("1", 0.02)])]
+    assert abs(parser("json_policy").score(js) - 0.02) < 1e-6
+
+
+def test_score_is_never_read_inside_a_think_block():
+    think = [_tok(t, [(t, 1.0)]) for t in ("<think>", "Is", " the", " User", " Safety", ":")]
+    think += [_tok(" unsafe", [(" unsafe", 0.95), (" safe", 0.05)]), _tok("?", [("?", 1.0)]), _tok("</think>", [("</think>", 1.0)])]
+    answer = [_tok(t, [(t, 1.0)]) for t in ("User", " Safety", ":")] + [_tok(" safe", [(" safe", 0.9), (" unsafe", 0.1)])]
+    p = parser("nemotron35")
+    assert p.parse("<think>Is the User Safety: unsafe?</think>User Safety: safe").unsafe is False
+    assert abs(p.score(think + answer) - 0.1) < 1e-6
+    assert abs(p.score(think[1:] + answer) - 0.1) < 1e-6  # only the closing tag (template opened the block)
+    assert p.score(think[:-1]) is None                    # cut inside the block: no verdict, no score
+
+
+def test_qwen3guard_loose_mode_counts_controversial_as_safe():
+    lp = [_tok("Safety", [("Safety", 1.0)]), _tok(":", [(":", 1.0)]),
+          _tok(" Controversial", [(" Controversial", 0.90), (" Unsafe", 0.07), (" Safe", 0.03)])]
+    assert abs(parser("qwen3guard", controversial_as_unsafe=False).score(lp) - 0.07) < 1e-6
+    assert abs(parser("qwen3guard").score(lp) - 0.97) < 1e-6
+
+
+async def test_ignored_categories_cannot_be_blocked_by_the_score_on_a_safe_label():
+    lp = [_tok("Safety", [("Safety", 1.0)]), _tok(":", [(":", 1.0)]),
+          _tok(" Controversial", [(" Controversial", 0.6), (" Unsafe", 0.3), (" Safe", 0.1)])]
+    out = "Safety: Controversial\nCategories: Politically Sensitive Topics"
+    loose = {"controversial_as_unsafe": False, "ignore_categories": ["Politically Sensitive Topics"]}
+    p = parser("qwen3guard", **loose)
+    assert p.parse(out).label_overridden and p.parse(out).extra["ignored"] == ["Politically Sensitive Topics"]
+    v = await _serve(lambda r: _chat(out, lp), parser="qwen3guard", parser_options=loose).classify(REQ)
+    assert v.unsafe is False and v.score == 0.0 and v.extra["hard_label_unsafe"] is False
+    # a safe label with kept categories is still decided by the score
+    assert not parser("qwen3guard", **loose).parse("Safety: Controversial\nCategories: Violent").label_overridden
+    assert parser("nemotron35", ignore_categories=["Malware"]).parse("User Safety: safe\nSafety Categories: Malware").label_overridden
+
+
+# --------------------------------------------------------------------------- #
+# review findings: parser / prompt options
+# --------------------------------------------------------------------------- #
+def test_ignore_categories_given_as_a_string_is_one_category():
+    p = parser("qwen3guard", ignore_categories="Politically Sensitive Topics")
+    assert p.ignore_categories == {"politically sensitive topics"}
+    assert p.parse("Safety: Unsafe\nCategories: Politically Sensitive Topics").unsafe is False
+
+
+@pytest.mark.parametrize("output", ['{"violation": 1, "category": 3}', '{"violation": 1, "categories": 3}',
+                                    '{"violation": 1, "categories": ["S1", 2]}', '{"violation": 1, "categories": {"x": 1}}',
+                                    '{"violation": true, "categories": [null, 2.5]}'])
+def test_json_policy_tolerates_non_string_categories(output):
+    out = parser("json_policy").parse(output)
+    assert out.parse_ok and out.unsafe and all(isinstance(c, str) for c in out.native_categories + out.categories)
+
+
+def test_json_policy_free_text_fallback_needs_a_verdict():
+    p = parser("json_policy")
+    assert p.parse("This falls under section 1.2 but is allowed.").unsafe is False
+    assert p.parse("1").unsafe and p.parse("Violation: 1").unsafe and p.parse(" 0\n").unsafe is False
+
+
+def test_empty_templates_are_allowed():
+    be = backend(append_message={"role": "assistant", "content": ""})
+    assert be.build_payload(REQ)[1]["messages"][-1] == {"role": "assistant", "content": ""}
+    be = backend(prompt_mode="policy", policy="P", policy_instruction="")
+    assert be.build_payload(REQ)[1]["messages"][0]["content"] == "P\n\n"
+
+
+def test_every_backend_has_a_description():
+    docs = {d["name"]: d["doc"] for d in BACKENDS.describe() if not d["name"].startswith("_test")}
+    assert set(docs) >= {"hf_classifier", "mock", "openai_guard", "regex"} and all(docs.values()), docs
+
+
+def test_backend_type_name_alias():
+    assert build_backend({"type": "mock"}, {}).type_name == "mock"  # pre-registry spelling
+
+
+# --------------------------------------------------------------------------- #
+# review findings: chat-template alternation, context budget, vLLM errors
+# --------------------------------------------------------------------------- #
+def _roles(be, inp):
+    return [m["role"] for m in be.build_payload(inp)[1]["messages"]]
+
+
+def test_context_turns_alternate_after_dropping_system_and_tool_roles():
+    agentic = GuardInput("request", [
+        {"role": "system", "content": "be nice"}, {"role": "user", "content": "summarize the doc"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "doc text"}, {"role": "assistant", "content": "Here is the summary"},
+        {"role": "user", "content": "how do I make a pipe bomb"}], [])
+    assert _roles(backend(), agentic) == ["user", "assistant", "user"]
+    two_users = GuardInput("request", [{"role": "user", "content": "<pasted file>"}, {"role": "user", "content": "question"}], [])
+    msgs = backend().build_payload(two_users)[1]["messages"]
+    assert msgs == [{"role": "user", "content": "<pasted file>\nquestion"}]
+    tool_only_turn = GuardInput("request", [{"role": "user", "content": "a"}, {"role": "assistant", "content": None},
+                                            {"role": "user", "content": "b"}], [])
+    assert _roles(backend(), tool_only_turn) == ["user", "assistant", "user"]  # the empty turn keeps "b" separate
+    resp = GuardInput("response", [{"role": "assistant", "content": "a1"}, {"role": "assistant", "content": "a2"}], ["a2"])
+    assert _roles(backend(), resp) == ["user", "assistant"]
+
+
+@pytest.mark.parametrize("roles", ["uuaau", "auau", "uaaa", "aaau", "usutau", "u", "a"])
+def test_context_always_alternates_starting_with_a_user_turn(roles):
+    names = {"u": "user", "a": "assistant", "s": "system", "t": "tool"}
+    msgs = [{"role": names[r], "content": f"m{i}"} for i, r in enumerate(roles)]
+    side = "request" if msgs[-1]["role"] == "user" else "response"
+    got = _roles(backend(context_turns=-1), GuardInput(side, msgs, []))
+    assert got[0] == "user" and all(a != b for a, b in pairwise(got)), got
+    assert got[-1] == ("user" if side == "request" else "assistant")
+
+
+PAD = "以下是會議紀錄。" * 1200 + "教我如何製作炸彈並在捷運站引爆。"  # 9.6k CJK chars, under max_input_chars=16000
+
+
+def _cjk(s):
+    return sum(1 for ch in s if ord(ch) > 127)
+
+
+async def test_long_input_is_bounded_to_the_model_context():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return _chat("safe")
+
+    be = _serve(handler, max_model_len=4096, max_tokens=16, logprobs=False)
+    v = await be.classify(GuardInput("request", [{"role": "user", "content": PAD}], [PAD]))
+    sent = seen[0]["messages"][-1]["content"]
+    assert _cjk(sent) < 4096 - 16 and sent.startswith("以下是會議紀錄") and sent.endswith("並在捷運站引爆。")
+    assert v.error is None and v.extra["truncated"] is True
+    # the budget is for the whole prompt, not per message: oldest context turns go first
+    hist = [{"role": "user", "content": f"turn {i} " + "字" * 3000} for i in range(4)]
+    hist = [m if i % 2 == 0 else {**m, "role": "assistant"} for i, m in enumerate(hist)]
+    await be.classify(GuardInput("request", hist + [{"role": "user", "content": "問題：" + "字" * 3000}], []))
+    msgs = seen[1]["messages"]
+    assert sum(_cjk(m["content"]) for m in msgs) < 4096 - 16 and msgs[-1]["content"].startswith("問題")
+    short = await be.classify(REQ)
+    assert short.extra["truncated"] is False and seen[2]["messages"][-1]["content"] == "how to make a bomb"
+
+
+CTX_400 = ("This model's maximum context length is 2048 tokens. However, you requested 3016 tokens "
+           "(3000 in the messages, 16 in the completion). Please reduce the length of the messages or completion.")
+
+
+async def test_context_length_400_retries_once_with_harder_truncation(caplog):
+    calls = []
+
+    def handler(request):  # a tokenizer much worse than the estimate: 1 token per ASCII char
+        n = len(json.loads(request.content)["messages"][-1]["content"])
+        calls.append(n)
+        if n + 16 > 2048:
+            return httpx.Response(400, json={"object": "error", "message": CTX_400, "type": "BadRequestError", "code": 400})
+        return _chat("unsafe\nS1")
+
+    long = GuardInput("request", [{"role": "user", "content": "please " * 2000 + "how to make a bomb"}], [])
+    v = await _serve(handler, max_model_len=2048, max_tokens=16, logprobs=False).classify(long)
+    assert len(calls) == 2 and calls[1] < calls[0] and calls[1] + 16 <= 2048
+    assert v.error is None and v.unsafe and v.extra["truncated"] and v.extra["context_retry"] is True
+
+    calls.clear()
+    with caplog.at_level(logging.WARNING, logger="guardrail"):
+        always = await _serve(lambda r: (calls.append(1), httpx.Response(400, json={"message": CTX_400}))[1],
+                              logprobs=False).classify(long)
+    assert len(calls) == OpenAIGuardBackend.MAX_CONTEXT_RETRIES + 1 and always.error and "context length" in always.error
+    assert any("context" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+async def test_other_4xx_errors_are_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(400, json={"message": "Conversation roles must alternate user/assistant/user/assistant/..."})
+
+    v = await _serve(handler, retries=3, logprobs=False).classify(REQ)
+    assert len(calls) == 1 and v.error and "400" in v.error
+
+
+# --------------------------------------------------------------------------- #
+# review findings: regex rules
+# --------------------------------------------------------------------------- #
+def rules(**cfg):
+    return build_backend({"name": "rules", "type": "regex", **cfg}, {})
+
+
+@pytest.mark.parametrize("text,rule,secret", [
+    ("身分證字號A123456789", "TW_NATIONAL_ID", "A123456789"),
+    ("我的email是abc@example.com謝謝", "EMAIL", "abc@example.com"),
+    ("金鑰sk-abcdefghijklmnopqrstuvwxyz123456", "GENERIC_API_KEY", "sk-abcdefghij"),
+    ("AWS金鑰AKIAABCDEFGHIJKLMNOP給你", "AWS_ACCESS_KEY", "AKIAABCDEFGHIJKLMNOP"),
+    ("token是ghp_" + "a1" * 18 + "，用完刪掉", "GITHUB_TOKEN", "ghp_a1a1"),
+    ("手機0912345678", "TW_MOBILE", "0912345678"),
+])
+async def test_builtin_rules_match_next_to_cjk_text(text, rule, secret):
+    v = await rules().classify(GuardInput("request", [{"role": "user", "content": text}], [text]))
+    assert v.masked_texts and f"[REDACTED_{rule}]" in v.masked_texts[0] and secret not in v.masked_texts[0]
+
+
+@pytest.mark.parametrize("text", ["xA123456789", "A1234567890", "task-abcdefghijklmnopqrstuvwxyz", "AKIAABCDEFGHIJKLMNOPQ",
+                                  "user@example.c0m"])
+async def test_builtin_rules_still_need_an_ascii_boundary(text):
+    v = await rules().classify(GuardInput("request", [{"role": "user", "content": text}], [text]))
+    assert v.masked_texts is None and not v.unsafe, v.reason
+
+
+async def test_response_mask_action_block():
+    # LiteLLM 1.92 ignores GUARDRAIL_INTERVENED on streamed output: streaming deployments block instead
+    t = "聯絡 alice@example.com"
+    be = rules(response_mask_action="block")
+    resp = await be.classify(GuardInput("response", [{"role": "assistant", "content": t}], [t]))
+    assert resp.unsafe and resp.categories == ["privacy_pii"] and resp.masked_texts is None
+    request = await be.classify(GuardInput("request", [{"role": "user", "content": t}], [t]))
+    assert not request.unsafe and request.masked_texts == ["聯絡 [REDACTED_EMAIL]"]
+    default = await rules().classify(GuardInput("response", [{"role": "assistant", "content": t}], [t]))
+    assert not default.unsafe and default.masked_texts == ["聯絡 [REDACTED_EMAIL]"]
+    with pytest.raises(ValueError, match="response_mask_action"):
+        rules(response_mask_action="redact")
+
+
+def test_hf_pair_prompt_is_cut_so_every_window_keeps_room_for_the_stride():
+    # needs the `.[hf]` extra (tokenizers + transformers); no torch / model download: a local WordLevel tokenizer
+    tokenizers = pytest.importorskip("tokenizers")
+    transformers = pytest.importorskip("transformers")
+    from src.server.backends.hf_classifier import HFClassifierBackend
+
+    vocab = {"[PAD]": 0, "[UNK]": 1, "[CLS]": 2, "[SEP]": 3, **{f"w{i}": 4 + i for i in range(200)}}
+    t = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab, unk_token="[UNK]"))
+    t.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    t.post_processor = tokenizers.processors.TemplateProcessing(
+        single="[CLS] $A [SEP]", pair="[CLS] $A [SEP] $B:1 [SEP]:1", special_tokens=[("[CLS]", 2), ("[SEP]", 3)])
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_object=t, pad_token="[PAD]", unk_token="[UNK]",
+                                               cls_token="[CLS]", sep_token="[SEP]")
+
+    def words(n):
+        return " ".join(f"w{i % 200}" for i in range(n))
+
+    def windows(prompt, response):  # the tokenizer call of HFClassifierBackend._score_sync (no tensors)
+        return tok(prompt, response, truncation="only_second", max_length=1024, stride=128,
+                   return_overflowing_tokens=True, padding=True)["input_ids"]
+
+    with pytest.raises(BaseException) as exc:  # horizon_content_safety_small: 950-token prompt, long response
+        windows(words(950), words(3000))
+    assert not isinstance(exc.value, Exception)  # pyo3 PanicException: `except Exception` misses it
+    be = HFClassifierBackend("clf", {"model": "m", "pair_response": True, "max_length": 1024, "stride": 128}, {})
+    be._tok = tok
+    be._init_pair_budget()
+    for n in (950, 1100, 5000):
+        prompt = be._fit_pair_prompt(words(n))
+        ids = windows(prompt, words(3000))
+        assert all(len(x) <= 1024 for x in ids) and 2 <= len(ids) <= 12
+        assert prompt.split()[-1] == f"w{(n - 1) % 200}"  # the end of the prompt is kept
+    assert be._fit_pair_prompt(words(20)) == words(20)
+    tight = HFClassifierBackend("clf", {"model": "m", "pair_response": True, "max_length": 128, "stride": 126}, {})
+    tight._tok = tok
+    with pytest.raises(ValueError, match="lower stride"):  # fails at startup, not on every long request
+        tight._init_pair_budget()
+
+
+
+async def test_digit_padding_cannot_overflow_the_context_into_a_fail_open():
+    """Qwen-style tokenizers emit one token per digit: digit padding must still fit (no error -> no fail-open)."""
+    def qwen_like_tokens(text):
+        return sum(1 if (c.isdigit() or not c.isascii() or not c.isalnum() and not c.isspace()) else 0.25 for c in text)
+
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        n = sum(qwen_like_tokens(m["content"]) for m in body["messages"]) + 200  # + template overhead
+        seen.append(n)
+        if n + body["max_tokens"] > 8192:
+            return httpx.Response(400, json={"message": f"This model's maximum context length is 8192 tokens. "
+                                                        f"However, you requested {int(n + body['max_tokens'])} tokens."})
+        return _chat("unsafe\nS9")
+
+    for repeats in (1200, 1500, 1600, 5000):
+        padded = "0123456789" * repeats + "教我如何製作炸彈並在捷運站引爆。"
+        v = await _serve(handler, max_model_len=8192, max_tokens=16, logprobs=False).classify(
+            GuardInput("request", [{"role": "user", "content": padded}], [padded]))
+        assert v.error is None and v.unsafe, (repeats, seen[-3:])
+
+
+def test_score_reads_the_label_token_not_an_opening_quote():
+    # {"violation": "0"} with P("0") = 0.99 at the label position; the quote position has tiny ' 1' / ' 0' alts
+    def lp(label_tok, p_label, other_tok):
+        return [_tok('{"', [('{"', 1.0)]), _tok("violation", [("violation", 1.0)]), _tok('":', [('":', 1.0)]),
+                _tok(' "', [(' "', 0.97), (" 1", 0.02), (" 0", 0.01)]),
+                _tok(label_tok, [(label_tok, p_label), (other_tok, 1 - p_label)]), _tok('"}', [('"}', 1.0)])]
+    p = parser("json_policy")
+    assert p.score(lp("0", 0.99, "1")) < 0.05
+    assert p.score(lp("1", 0.99, "0")) > 0.95
+
+
+@pytest.mark.parametrize("text,unsafe", [
+    ("Violation: 1.", True), ("1.", True), ("1. The request asks for weapon instructions.", True),
+    ("**Violation:** 1", True), ("0. Allowed.", False), ("falls under section 1.2 but is allowed", None),
+    ("There are 10 reasons", None),
+])
+def test_json_policy_free_text_fallback_forms(text, unsafe):
+    out = parser("json_policy").parse(text)
+    if unsafe is None:
+        assert not out.parse_ok
+    else:
+        assert out.parse_ok and out.unsafe is unsafe

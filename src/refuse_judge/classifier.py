@@ -22,7 +22,8 @@ runs in the default executor so it does not block the event loop.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Mapping, cast
+from collections.abc import Mapping
+from typing import Any, cast
 
 from .base import LABELS, REFUSAL_JUDGES, RefusalJudge, RefusalLabel, RefusalVerdict
 from .scoring import argmax_label, refusal_score
@@ -32,6 +33,21 @@ DEFAULT_LABEL_NAMES: dict[str, tuple[str, ...]] = {
     "partial": ("partial", "partial_refusal"),
     "compliance": ("compliance", "complied", "comply", "non_refusal", "normal", "answer"),
 }
+
+
+def torch_dtype_kwargs(dtype: str | None, torch: Any) -> dict[str, Any]:
+    """``from_pretrained`` kwargs for the ``dtype`` config: unset -> {}, ``auto`` -> the checkpoint's
+    own dtype, else a torch dtype name (``float16`` / ``bfloat16`` / ``float32``)."""
+    if not dtype:
+        return {}
+    if str(dtype).lower() == "auto":
+        return {"torch_dtype": "auto"}
+    value = getattr(torch, str(dtype), None)
+    is_dtype = isinstance(value, torch.dtype)  # e.g. "fp16" or "cuda" are bad config VALUES (ValueError)
+    if not is_dtype:
+        raise ValueError(f"hf_classifier dtype must be auto or a torch dtype name (float16, bfloat16, float32), "
+                         f"got {dtype!r}")
+    return {"torch_dtype": value}
 
 
 @REFUSAL_JUDGES.register("hf_classifier")
@@ -98,7 +114,7 @@ class HFClassifierJudge(RefusalJudge):
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         device = ("cuda" if torch.cuda.is_available() else "cpu") if self.device == "auto" else self.device
-        kw = {"torch_dtype": getattr(torch, self.dtype)} if self.dtype else {}
+        kw = torch_dtype_kwargs(self.dtype, torch)
         self._tok = AutoTokenizer.from_pretrained(self.model_id, revision=self.revision)
         self._model = AutoModelForSequenceClassification.from_pretrained(
             self.model_id, revision=self.revision, **kw).to(device).eval()

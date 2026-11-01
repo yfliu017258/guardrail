@@ -48,7 +48,8 @@ class ClassifyRequest(BaseModel):
     text: Optional[str] = None                       # the judged text
     prompt: Optional[str] = None                     # context for response classification
     messages: Optional[list[dict[str, Any]]] = None  # alternative: full conversation
-    run_all: bool = True                             # disable short-circuit to collect every stage's verdict
+    tool_calls: Optional[list[dict[str, Any]]] = None  # OpenAI tool calls to judge (function name + arguments)
+    run_all: bool = True                             # no short-circuit, shadow stages awaited: every stage's verdict
     stages: Optional[list[str]] = None               # restrict to these stage names
     include_raw: bool = True
 

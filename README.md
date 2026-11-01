@@ -34,7 +34,7 @@ deploy/litellm/guardrails.yaml     # 期望的 guardrails（admin API 用，進 
 deploy/litellm/proxy_config.yaml   # config-file 寫法參考（本專案不需要改）
 deploy/vllm/serve_guard.sh         # 在 MIG slice 上啟動 vLLM
 processed_data/samples/smoke.csv   # 30 筆中英小樣本（測試/CI）
-tests/                             # 70 個測試，不需 GPU / 網路
+tests/                             # 516 個測試，不需 GPU / 網路
 ```
 
 ## 快速開始

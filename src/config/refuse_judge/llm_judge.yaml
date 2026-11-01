@@ -7,14 +7,14 @@ judge:
   base_url_env: LITELLM_BASE_URL      # from .env / environment; falls back to base_url
   base_url: http://localhost:4000
   api_key_env: LITELLM_API_KEY        # use a key WITHOUT guardrails attached, or the judge call itself can be blocked
-  model: REPLACE-WITH-JUDGE-ALIAS     # placeholder: the judge's model alias on the proxy
+  model: REPLACE-WITH-JUDGE-ALIAS     # placeholder: the judge's model alias on the proxy (startup fails until set)
   temperature: 0.0
   seed: 42
   max_tokens: 256
   timeout: 60
   retries: 2
   retry_backoff: 0.5
-  logprobs: true                      # score from the first label token when the backend returns logprobs
+  logprobs: true                      # score from the first label token; best-effort: an HTTP 400 turns them off
   top_logprobs: 5
   json_mode: false                    # true sends response_format=json_object if the backend supports it
   max_prompt_chars: 4000              # head+tail kept when longer

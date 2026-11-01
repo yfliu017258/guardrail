@@ -11,29 +11,42 @@ they read the answer*. ``ChatCompletionJudge`` is a template method::
 
 Failures (transport errors, 5xx after retries, 4xx) are raised as ``JudgeHTTPError``;
 ``RefusalJudge.judge`` turns them into ``verdict.error`` so an eval run never crashes on them and
-the task's error policy decides what an errored row means.
+the task's error policy decides what an errored row means. Logprobs are best-effort: an HTTP 400 on
+a request that asked for them (a backend / LiteLLM route without logprobs support) is retried once
+without them; if that succeeds they stay off for the rest of the run (logged once) and scores fall
+back to the hard label. ``startup`` refuses a placeholder model (``REPLACE-WITH-...`` in the shipped configs),
+which would otherwise turn every row into an error.
 """
 
 from __future__ import annotations
 
 import abc
 import asyncio
+import logging
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
 
 from ..config import env, scrub_url
 from .base import RefusalJudge, RefusalVerdict
 
+log = logging.getLogger("refuse_judge")
+
 Message = dict[str, Any]
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+PLACEHOLDER_MODEL_PREFIX = "REPLACE-WITH"
 
 
 class JudgeHTTPError(RuntimeError):
     """The judge endpoint did not return a usable completion."""
+
+
+class JudgeBadRequest(JudgeHTTPError):
+    """HTTP 400: the server rejected the request body (e.g. an unsupported ``logprobs`` parameter)."""
 
 
 @dataclass
@@ -110,11 +123,18 @@ class ChatCompletionJudge(RefusalJudge):
         self.retry_backoff = float(self.cfg.get("retry_backoff", 0.5))
         self.request_logprobs = bool(self.cfg.get("logprobs", False))
         self.top_logprobs = int(self.cfg.get("top_logprobs", 5))
+        self.logprobs_disabled: str | None = None  # why logprobs were switched off mid-run, if they were
         self.extra_body: dict[str, Any] = dict(self.cfg.get("extra_body") or {})
         self._client: httpx.AsyncClient | None = None
 
     # -- lifecycle -------------------------------------------------------- #
     async def startup(self) -> None:
+        if str(self.model).upper().startswith(PLACEHOLDER_MODEL_PREFIX):
+            raise ValueError(
+                f"{self.name} judge: model is still the placeholder {self.model!r}; set the judge's model alias, "
+                f"e.g. `--set judge.model=<alias>` (src.refuse_judge CLI), `--set judge.then.model=<alias>` "
+                f"(cascade.yaml), or `--set task.<task>.judge.then.model=<alias>` (model_safety / refusal_judge "
+                f"tasks with the cascade); see src/config/refuse_judge/cascade.yaml")
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url, timeout=self.timeout, transport=self.transport,
@@ -131,7 +151,8 @@ class ChatCompletionJudge(RefusalJudge):
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "model": self.model, "base_url": scrub_url(self.base_url),
                 "temperature": self.cfg.get("temperature", 0.0), "max_tokens": self.max_tokens,
-                "logprobs": self.request_logprobs, "extra_body": self.extra_body}
+                "logprobs": self.request_logprobs, "logprobs_disabled": self.logprobs_disabled,
+                "extra_body": self.extra_body}
 
     # -- request ---------------------------------------------------------- #
     @property
@@ -149,9 +170,30 @@ class ChatCompletionJudge(RefusalJudge):
         return body
 
     async def chat(self, messages: list[Message]) -> ChatReply:
+        body = self.payload(messages)
+        try:
+            return await self._post(body)
+        except JudgeBadRequest as e:
+            if not body.get("logprobs"):
+                raise
+            # once without logprobs; switch them off only if that worked (a 400 for another reason,
+            # e.g. an over-long input, propagates and keeps logprobs for the other rows)
+            reply = await self._post({k: v for k, v in body.items() if k not in ("logprobs", "top_logprobs")})
+            self._disable_logprobs(str(e))
+            return reply
+
+    def _disable_logprobs(self, why: str) -> None:
+        """Best-effort logprobs: switch them off for the rest of the run (concurrent rows that were
+        already in flight also land here; only the first one logs)."""
+        self.request_logprobs = False
+        if self.logprobs_disabled is None:
+            self.logprobs_disabled = why[:300]
+            log.warning("%s judge: the endpoint rejected logprobs (%s); retrying without them and disabling "
+                        "logprobs for the rest of the run: scores fall back to the hard label", self.name, why[:200])
+
+    async def _post(self, body: dict[str, Any]) -> ChatReply:
         if self._client is None:
             raise JudgeHTTPError("startup() not called")
-        body = self.payload(messages)
         last = ""
         for attempt in range(self.retries + 1):
             if attempt:
@@ -164,6 +206,8 @@ class ChatCompletionJudge(RefusalJudge):
             if r.status_code in RETRYABLE_STATUS:
                 last = f"HTTP {r.status_code}: {r.text[:200]}"
                 continue
+            if r.status_code == 400:
+                raise JudgeBadRequest(f"HTTP 400: {r.text[:300]}")
             if r.status_code != 200:
                 raise JudgeHTTPError(f"HTTP {r.status_code}: {r.text[:300]}")
             return self._reply(r)

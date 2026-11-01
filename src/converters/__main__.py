@@ -5,14 +5,22 @@
     python -m src.converters --dataset toxic_chat aegis2 wildguardmix --limit 5000
     python -m src.converters --config src/config/data.yaml            # everything listed there
     python -m src.converters --dataset local_file --set path=data/raw/internal_redteam.jsonl \
-        --set columns.prompt=question --set columns.label=is_attack --set label_map.1=unsafe
+        --set columns.prompt=question --set columns.label=is_attack --set label_map.1=unsafe --set label_map.0=safe
+    python -m src.converters --dataset local_file ... --set 'label_map={"1": unsafe, "0": safe}'   # same, one flag
     python -m src.converters.mix --config src/config/data.yaml        # build fixed eval mixes
+
+``--set a.1=x`` normally means "list index 1"; for the mapping options a converter declares in
+``MAPPING_OPTIONS`` (local_file: columns / label_map / category_map) a missing mapping is created
+first, so ``label_map.1`` is the key ``"1"``.
+
+``--list`` exits non-zero (after listing what did load) when a converter module failed to import.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 from ..config import get_by_path, load_config, parse_overrides, set_by_path
 from .base import CONVERTERS
@@ -35,6 +43,10 @@ def main(argv: list[str] | None = None) -> None:
     if a.list:
         for name, cls in CONVERTERS.items():
             print(f"{name:28s} {cls.hf_id or '(local)':55s} license={cls.license} gated={cls.gated}")
+        if CONVERTERS.import_errors:  # their converters are missing from the list above
+            for module, err in CONVERTERS.import_errors.items():
+                print(f"error: converter module {module} failed to import: {err}", file=sys.stderr)
+            sys.exit(1)
         return
 
     cfg = load_config(a.config, env_file=".env", run_kind="convert") if a.config else {}
@@ -50,7 +62,11 @@ def main(argv: list[str] | None = None) -> None:
         p.error("nothing to do: pass --dataset or --config with a `datasets:` mapping")
 
     for name, job in jobs.items():
-        for k, v in parse_overrides(a.overrides):
+        mapping_options = CONVERTERS.get(job.get("converter", name)).MAPPING_OPTIONS
+        for k, v in parse_overrides(a.overrides):  # parsed per job: YAML values must not be shared between jobs
+            head = k.split(".", 1)[0]
+            if "." in k and head in mapping_options and not isinstance(job.get(head), dict):
+                job[head] = {}  # `label_map.1=unsafe`: "1" is a key here, not a list index
             set_by_path(job, k, v)
         # `converter:` lets one class produce several named outputs (nemotron_safety_v3_zh / _zhtw)
         conv = CONVERTERS.build(job, type_key="converter", default=name, name=name, raw_dir=raw_dir,

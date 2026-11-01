@@ -11,6 +11,7 @@ pipeline:
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: openai/gpt-oss-safeguard-20b
+      max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: json_policy
       prompt_mode: policy
       policy_file: src/config/server/policies/enterprise_policy.md

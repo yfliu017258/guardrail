@@ -9,6 +9,9 @@ by class attributes; a hook is overridden only for what the attributes cannot ex
     PromptResponseConverter   prompt (+ response) per record -> a request and/or a response sample,
                               response rows optionally carrying ``refusal_label``
 
+A label must never silently become ``safe``: a missing label or a value outside the declared
+sets is a malformed row (counted ``invalid``), not a negative.
+
 Hooks receive the raw record (plus the judged ``side`` for prompt/response sets). The source
 split being converted is ``self.current_split`` — used by the few sets whose split is the label.
 """
@@ -25,18 +28,49 @@ from .base import BaseConverter, Record
 
 
 def label_key(value: Any) -> str:
-    """Normalise a raw label so ``1`` / ``1.0`` / ``True`` / ``"1"`` (and case / padding) compare equal.
+    """Normalise a raw label so ``1`` / ``1.0`` / ``True`` / ``"1"`` / ``"1.0"`` / ``"true"`` (and case /
+    padding, numpy scalars) compare equal — CSV and pandas exports turn an int column into ``1.0``.
 
-    A missing label raises: an unlabelled row must be counted invalid, not silently become safe."""
-    if value is None or (isinstance(value, float) and math.isnan(value)):  # None / NaN from pandas
+    A missing label (None / NaN / pd.NA / blank) raises: an unlabelled row must be counted invalid,
+    not silently become safe."""
+    if hasattr(value, "item") and type(value).__module__ == "numpy":  # numpy scalar (np.bool_ is not numbers.Real)
+        value = value.item()
+    if is_missing(value):
         raise ValueError("missing label")
-    if isinstance(value, numbers.Real) and float(value).is_integer():  # bool and numpy ints included
+    if isinstance(value, numbers.Real) and float(value).is_integer():  # bool and ints included
         return str(int(value))
-    return str(value).strip().lower()
+    key = str(value).strip().lower()
+    if key in ("true", "false"):
+        return "1" if key == "true" else "0"
+    try:
+        number = float(key)
+    except ValueError:
+        return key
+    if math.isnan(number):  # "nan" / "NaN" written by an export
+        raise ValueError("missing label")
+    return str(int(number)) if number.is_integer() else key
+
+
+def is_missing(value: Any) -> bool:
+    """None, float NaN, pandas NA / NaT, or a blank string."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return True
+    if type(value).__name__ in ("NAType", "NaTType"):
+        return True
+    return isinstance(value, str) and not value.strip()
+
+
+def label_set(values: Iterable[Any] | None) -> frozenset[str] | None:
+    return None if values is None else frozenset(label_key(v) for v in values)
 
 
 class TextLabelConverter(BaseConverter):
     """One text column + one label column -> one ``request`` sample per row.
+
+    The label is unsafe when it is in ``positive_values`` and safe when it is in ``negative_values``
+    (both compared through ``label_key``, so ``{"INJECTION"}`` matches ``"injection"`` and ``{"1"}``
+    matches ``1.0``); any other value raises -> the row is counted ``invalid``. A set whose label is
+    "violation vs anything else" opts out with ``negative_values = None``.
 
     Unsafe rows get ``[category]`` and ``attack_type``; safe rows get neither. By default the
     text is used verbatim, so a missing / blank text fails validation and is counted ``invalid``;
@@ -46,7 +80,8 @@ class TextLabelConverter(BaseConverter):
 
     text_field: ClassVar[str] = "text"
     label_field: ClassVar[str] = "label"
-    positive_values: ClassVar[frozenset[str]] = frozenset({"1"})  # ``label_key`` values meaning unsafe
+    positive_values: ClassVar[frozenset[str]] = frozenset({"1"})          # label values meaning unsafe
+    negative_values: ClassVar[frozenset[str] | None] = frozenset({"0"})   # label values meaning safe; None = all others
     category: ClassVar[str] = "other"           # category of unsafe rows
     attack_type: ClassVar[str | None] = None    # attack_type of unsafe rows
     language: ClassVar[str] = "auto"            # "auto" = detect from the text
@@ -80,7 +115,15 @@ class TextLabelConverter(BaseConverter):
         return str(value or "").strip() if self.skip_blank_text else value
 
     def is_unsafe(self, r: Record) -> bool:
-        return label_key(r.get(self.label_field)) in self.positive_values
+        value = r.get(self.label_field)
+        key = label_key(value)
+        if key in label_set(self.positive_values):
+            return True
+        negatives = label_set(self.negative_values)
+        if negatives is None or key in negatives:
+            return False
+        raise ValueError(f"unknown {self.label_field} {value!r} (unsafe: {sorted(label_set(self.positive_values))}, "
+                         f"safe: {sorted(negatives)})")
 
     def categories(self, r: Record) -> list[str]:
         """Categories of an unsafe row (never called for safe rows)."""
@@ -120,6 +163,11 @@ class PromptResponseConverter(BaseConverter):
     ground truth would bias a refusal-judge eval. Every sample needs the prompt: a response
     without its prompt has no context to judge. Options ``include_prompts`` / ``include_responses``
     override the class defaults of the same name.
+
+    The two sides are judged independently: ``keep_side`` drops one side on purpose (counted
+    ``skipped_<side>``), and a side that fails (bad refusal value, invalid sample) is counted
+    ``invalid_<side>`` while the other side is still emitted. Only when NO sample survives does the
+    error propagate, so the record is counted ``invalid`` as a whole.
     """
 
     prompt_field: ClassVar[str] = "prompt"
@@ -142,14 +190,35 @@ class PromptResponseConverter(BaseConverter):
         prompt = self.text(record, self.prompt_field)
         if not prompt:
             return None
-        out = []
-        if self.wants("request") and (label := self.prompt_label(record)) is not None:
-            out.append(self._side_sample(record, "request", label, prompt=prompt))
+        out, failed = [], []
         response = self.text(record, self.response_field)
-        if response and self.wants("response") and (label := self.response_label(record)) is not None:
-            out.append(self._side_sample(record, "response", label, prompt=prompt, response=response,
-                                         refusal_label=self.refusal_label(record)))
+        for side in ("request", "response"):
+            if not self.wants(side) or (side == "response" and not response):
+                continue
+            if not self.keep_side(record, side):
+                self.stats[f"skipped_{side}"] += 1
+                continue
+            try:
+                sample = self._side(record, side, prompt, response)
+            except Exception as e:  # noqa: BLE001 - one bad side must not cost the other side's sample
+                failed.append((side, e))
+                continue
+            if sample is not None:
+                out.append(sample)
+        if failed and not out:
+            raise failed[0][1]  # nothing survives -> the record is invalid
+        for side, _ in failed:
+            self.stats[f"invalid_{side}"] += 1
         return out
+
+    def _side(self, r: Record, side: InputType, prompt: str, response: str) -> GuardrailSample | None:
+        if side == "request":
+            label = self.prompt_label(r)
+            return None if label is None else self._side_sample(r, side, label, prompt=prompt)
+        label = self.response_label(r)
+        if label is None:
+            return None
+        return self._side_sample(r, side, label, prompt=prompt, response=response, refusal_label=self.refusal_label(r))
 
     def _side_sample(self, r: Record, side: InputType, label: str, **fields: Any) -> GuardrailSample:
         unsafe = label == Label.UNSAFE.value
@@ -161,6 +230,10 @@ class PromptResponseConverter(BaseConverter):
     # -- hooks ------------------------------------------------------------ #
     def keep(self, r: Record) -> bool:
         """``False`` drops the whole record on purpose (counted ``skipped``)."""
+        return True
+
+    def keep_side(self, r: Record, side: InputType) -> bool:
+        """``False`` drops one side's sample on purpose (counted ``skipped_<side>``), e.g. an artefact response."""
         return True
 
     def wants(self, side: InputType) -> bool:

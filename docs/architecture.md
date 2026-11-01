@@ -14,7 +14,7 @@
 | Request（post_call） | `texts` = 模型輸出的各 choice 文字；**沒有 prompt 上下文** |
 | Response | `{"action": "NONE"}` 放行；`{"action": "BLOCKED", "blocked_reason": "..."}` → proxy 拋 `GuardrailRaisedException`（client 收到錯誤）；`{"action": "GUARDRAIL_INTERVENED", "texts": [...]}` → 依序替換文字（遮罩） |
 | 錯誤處理 | `unreachable_fallback: fail_open|fail_closed`（連不上 / 502/503/504）；`fail_on_error: false` → 任何錯誤都放行 |
-| Streaming | 預設每 `streaming_sampling_rate`（5）個 chunk 檢查一次；`streaming_end_of_stream_only: true` 只在結尾檢查 |
+| Streaming | 預設每 `streaming_sampling_rate`（5）個 chunk 檢查一次；`streaming_end_of_stream_only: true` 只在結尾檢查。**streaming 時只有 BLOCKED 有效，`GUARDRAIL_INTERVENED` 的遮罩不會套用**（1.92 會原樣送出 chunk），所以 streaming 的部署要在 regex stage 設 `response_mask_action: block`；短於取樣間隔的回覆在擋下之前就已送達。`streaming_buffer_until_moderated` 不會傳給 `generic_guardrail_api` |
 | 測試端點 | `POST /guardrails/apply_guardrail {guardrail_name, text, input_type}` → 不呼叫 LLM 直接跑 guardrail（evaluation 的 `litellm_apply_guardrail` target） |
 
 ## 1.1 Admin API（不改 config file 時的管理方式）
@@ -59,8 +59,15 @@ LiteLLM request ──► build_inputs()  (request_scope: last_user | all_user |
      action = BLOCKED | GUARDRAIL_INTERVENED (masked texts) | NONE
 ```
 
+- **會判斷哪些內容**（每項都是一個額外的 `GuardInput`，帶有 `origin` 欄位）：
+  - 最新的 user 訊息（依 `request_scope`）。
+  - client 的 **system / developer 訊息**（`pipeline.judge_system_messages`，預設 true；shared proxy 上 client 可以自己寫 system prompt）。
+  - 最後一則 user 訊息之後的 **tool 輸出與 assistant 文字**（`pipeline.judge_tool_messages`，預設 true；indirect prompt injection 就藏在這裡）。
+  - **tool_calls**（函式名稱 + 參數，request 與 response 兩側都判斷；任何 rule 命中都回 BLOCKED，因為 tool call 沒辦法遮罩）。
+- **限制**：stage 名稱不能重複；每個 input type 最多只能有一個會遮罩的 stage（LiteLLM 依位置替換 texts，兩組遮罩無法合併）；shadow stage 在 LiteLLM 路由上以背景工作執行，不佔請求延遲，`/v1/classify` 的 `run_all` 會等它跑完。
+- **Context 上限**：`openai_guard` 依 `max_model_len`（必須等於 vLLM 的 `--max-model-len`）估算 token 預算，並保留頭尾截斷。估算時數字與標點各算 1 個 token，因為 Qwen 會逐位切數字。伺服器回 context 過長時，依「實際送出量 × 伺服器回報的超出比例」縮減，最多重試 3 次；仍失敗就回 error，由 `on_error` 決定。
 - **`request_scope: last_user`**（預設）：只判斷最新一則 user 訊息，之前的對話當 context。否則多輪對話中一句舊的可疑內容會讓之後每一輪都被擋。若要抓「分多輪拼湊的攻擊」，改用 `all_user`。
-- **分數**：`openai_guard` 從 vLLM logprobs 在標籤 token 位置（例如 `Safety:` 之後）算 P(unsafe)；有分數時由 `threshold` 決定，hard label 保留在 `extra.hard_label_unsafe`。
+- **分數**：`openai_guard` 從 vLLM logprobs 算 P(unsafe)，只在「anchor 之後、模型實際產生 label token」的位置讀，不讀空白、引號，也不讀 `<think>` 內的位置。有分數時由 `threshold` 決定，hard label 保留在 `extra.hard_label_unsafe`。parser 因選項而推翻 label 時（例如 ignored category），分數會改成和判定一致，原始值存在 `extra.label_score`。rule stage（regex）不產生假機率，分數是 `None`；但 rule 擋下的列，pipeline 分數固定為 1.0，re-threshold 時才不會把它當成放行。
 - **Log**：預設不記錄 prompt 原文（`server.log_text: false`），只記錄決策、類別、分數、延遲。
 
 ## 4. Evaluation 可重現性

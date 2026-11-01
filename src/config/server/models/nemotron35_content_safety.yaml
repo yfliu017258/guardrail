@@ -12,6 +12,7 @@ pipeline:
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: nvidia/Nemotron-3.5-Content-Safety
+      max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: nemotron35
       prompt_mode: chat_template
       content_as_parts: true          # card example sends content as [{type: text, text: ...}]

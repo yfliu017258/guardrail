@@ -64,11 +64,19 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
         stats[f"{input_type}:{res.action}"] += 1
         if res.errors:
             stats["errors"] += 1
+        stages: dict[str, dict[str, Any]] = {}
+        for v in res.verdicts:  # one verdict per judged input (turn, system, tool output, tool call ...)
+            s = stages.setdefault(v.stage, {"unsafe": False, "score": None, "ms": 0.0})
+            s["unsafe"] = s["unsafe"] or v.unsafe
+            if v.score is not None:
+                s["score"] = v.score if s["score"] is None else max(s["score"], v.score)
+            s["ms"] = max(s["ms"], round(v.latency_ms, 1))
+            if v.unsafe:
+                s.setdefault("flagged", []).append(v.extra.get("origin", "turn"))
         record = {
             "route": route, "call_id": call_id, "input_type": input_type, "action": res.action,
             "categories": res.categories, "blocked_by": res.blocked_by, "score": res.score,
-            "latency_ms": round(res.latency_ms, 1), "errors": res.errors,
-            "stages": {v.stage: {"unsafe": v.unsafe, "score": v.score, "ms": round(v.latency_ms, 1)} for v in res.verdicts},
+            "latency_ms": round(res.latency_ms, 1), "errors": res.errors, "stages": stages,
         }
         if log_text:
             record["text"] = text[:500]
@@ -90,9 +98,9 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
     @app.post("/beta/litellm_basic_guardrail_api", response_model=LiteLLMGuardrailResponse,
               response_model_exclude_none=True, dependencies=[Depends(auth)])
     async def litellm_guardrail(req: LiteLLMGuardrailRequest) -> LiteLLMGuardrailResponse:
-        inputs = pipeline.build_inputs(req.input_type, req.texts, req.structured_messages)
-        res = await pipeline.run(inputs)
-        _log_decision("litellm", req.litellm_call_id, res, req.input_type, inputs[-1].target_text)
+        inputs = pipeline.build_inputs(req.input_type, req.texts, req.structured_messages, req.tool_calls)
+        res = await pipeline.run(inputs, call_id=req.litellm_call_id)  # shadow stages run in the background
+        _log_decision("litellm", req.litellm_call_id, res, req.input_type, inputs[0].target_text)
         if res.action == ACTION_BLOCKED:
             cats = ", ".join(res.categories) if (expose_categories and res.categories) else "policy"
             return LiteLLMGuardrailResponse(
@@ -111,19 +119,21 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
 
     @app.post("/v1/classify", response_model=ClassifyResponse, dependencies=[Depends(auth)])
     async def classify(req: ClassifyRequest) -> ClassifyResponse:
+        calls = list(req.tool_calls or [])
         if req.messages:
             msgs = req.messages
             texts = [m.get("content", "") for m in msgs if isinstance(m.get("content"), str)]
             if req.input_type == "response":
-                inputs = pipeline.build_inputs("response", [msgs[-1].get("content", "")], msgs[:-1])
+                calls += [c for c in (msgs[-1].get("tool_calls") or []) if isinstance(c, dict)]
+                inputs = pipeline.build_inputs("response", [msgs[-1].get("content", "")], msgs[:-1], calls)
             else:
-                inputs = pipeline.build_inputs("request", texts, msgs)
+                inputs = pipeline.build_inputs("request", texts, msgs, calls)
         elif req.text is not None:
             if req.input_type == "response":
                 ctx = [{"role": "user", "content": req.prompt}] if req.prompt else []
-                inputs = pipeline.build_inputs("response", [req.text], ctx)
+                inputs = pipeline.build_inputs("response", [req.text], ctx, calls)
             else:
-                inputs = pipeline.build_inputs("request", [req.text], [{"role": "user", "content": req.text}])
+                inputs = pipeline.build_inputs("request", [req.text], [{"role": "user", "content": req.text}], calls)
         else:
             raise HTTPException(status_code=422, detail="provide `text` or `messages`")
         res = await pipeline.run(inputs, run_all=req.run_all, only=req.stages)
