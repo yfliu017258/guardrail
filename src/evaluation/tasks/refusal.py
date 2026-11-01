@@ -21,9 +21,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from ...config import PROJECT_ROOT, load_config
+from ...config import PROJECT_ROOT, deep_merge, load_config
+from ...config.config import load_yaml
 from ...data_schema import GuardrailSample
 from ...refuse_judge import LABELS, RefusalJudge, RefusalVerdict, build_judge
 from ..generation import Generation, Generator, build_generator
@@ -38,11 +37,13 @@ def _resolve(p: str | Path) -> Path:
 
 
 def load_judge_cfg(section: dict[str, Any]) -> dict[str, Any]:
-    """``judge: {...}`` inline, or ``judge_config: path.yaml`` (top-level ``judge:``), inline keys win."""
+    """``judge_config: path.yaml`` (top-level ``judge:``; ``_base_`` supported) deep-merged with inline
+    ``judge: {...}`` — so ``--set task.model_safety.judge.then.model=glm-5.3-flash`` overrides one nested
+    key of a cascade instead of replacing the whole stage."""
     cfg: dict[str, Any] = {}
     if section.get("judge_config"):
-        cfg = dict((yaml.safe_load(_resolve(section["judge_config"]).read_text(encoding="utf-8")) or {}).get("judge", {}))
-    cfg.update(section.get("judge") or {})
+        cfg = dict(load_yaml(_resolve(section["judge_config"])).get("judge", {}))
+    cfg = deep_merge(cfg, section.get("judge") or {})
     if "type" not in cfg:
         raise ValueError("task needs `judge: {type: ...}` or `judge_config: <yaml>`")
     return cfg
@@ -68,6 +69,7 @@ class _JudgeTask(EvalTask):
             "refusal_label": v.label,
             "judge": v.judge,
             "judge_reason": (v.reason or "")[:500],
+            "judge_extra": _compact(v.extra),
             "judge_latency_ms": v.latency_ms,
             "error": v.error,
             "raw": (v.raw or "")[: self.max_chars] or None,
@@ -204,7 +206,8 @@ class ModelSafetyTask(_JudgeTask):
             return {**row, "pred_positive": None, "error": f"generation: {gen.error}", "latency_ms": gen.latency_ms}
         if gen.blocked:
             v = RefusalVerdict(label="refusal" if self.blocked_is_refusal else "compliance",
-                               refused=self.blocked_is_refusal, judge="guardrail_block", reason="blocked by guardrail")
+                               refused=self.blocked_is_refusal, judge="guardrail_block", reason="blocked by guardrail",
+                               score=1.0 if self.blocked_is_refusal else 0.0)  # hard score keeps AUROC computable
         else:
             v = await self.judge.judge(sample.prompt, gen.text, gen.reasoning)
         row.update(self._verdict_fields(v))
@@ -251,6 +254,14 @@ class ModelSafetyTask(_JudgeTask):
         out["model_safety"]["refusal_rate_by_category"] = {c: {"n": len(g), "refusal_rate": rate(g, lambda r: r["pred_positive"])}
                                                            for c, g in sorted(by_cat.items())}
         return out
+
+
+def _compact(extra: dict[str, Any] | None, limit: int = 2000) -> dict[str, Any] | None:
+    """Judge diagnostics (cascade trail, keyword matches...) kept on the row, size-bounded."""
+    if not extra:
+        return None
+    text = json.dumps(extra, ensure_ascii=False, default=str)
+    return extra if len(text) <= limit else {"truncated": text[:limit]}
 
 
 def cohen_kappa(conf: dict[str, dict[str, int]]) -> float | None:

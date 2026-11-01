@@ -114,3 +114,14 @@ def test_rescore_model_safety(tmp_path):
     main(["--rescore", str(run), *ARGS])
     (sub,) = [p for p in run.iterdir() if p.name.startswith("rescore_default_")]
     assert json.loads((sub / "metrics.json").read_text())["model_safety"]
+
+
+def test_judge_config_deep_merge(tmp_path):
+    from src.evaluation.tasks.refusal import load_judge_cfg
+
+    base = tmp_path / "base.yaml"
+    base.write_text("judge: {type: cascade, hi: 0.85, first: {type: keyword}, then: {type: llm, model: X, timeout: 30}}\n")
+    child = tmp_path / "child.yaml"
+    child.write_text(f"_base_: {base.name}\njudge: {{hi: 0.9}}\n")
+    cfg = load_judge_cfg({"judge_config": str(child), "judge": {"then": {"model": "glm-5.3-flash"}}})
+    assert cfg["hi"] == 0.9 and cfg["then"] == {"type": "llm", "model": "glm-5.3-flash", "timeout": 30}
