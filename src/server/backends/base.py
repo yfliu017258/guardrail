@@ -1,11 +1,25 @@
-"""Backend contract: every guard (LLM guard, classifier, regex, mock) implements ``GuardBackend``."""
+"""Backend contract: every guard (LLM guard, classifier, regex, mock) implements ``GuardBackend``.
+
+Backends are classes in the ``BACKENDS`` registry; a pipeline stage's ``type`` picks one::
+
+    @BACKENDS.register("my_guard")
+    class MyGuard(GuardBackend):
+        async def _classify(self, inp: GuardInput) -> Verdict: ...
+
+    backend = build_backend({"name": "x", "type": "my_guard", ...}, root_cfg)
+
+A backend living outside this package registers itself on import; add its module to ``BACKENDS``'
+``lazy_modules`` (or call ``BACKENDS.add_lazy_module``) so configs can name it without an import.
+"""
 
 from __future__ import annotations
 
 import abc
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, ClassVar, Literal
+
+from ...common import Registry
 
 InputType = Literal["request", "response"]
 Message = dict[str, Any]  # OpenAI-style {"role": ..., "content": ...}
@@ -50,13 +64,18 @@ class Verdict:
 class GuardBackend(abc.ABC):
     """Subclasses implement ``_classify``; ``classify`` adds timing and error capture."""
 
-    type_name: str = "base"
+    registry_name: ClassVar[str] = "base"  # set by @BACKENDS.register; reported as the stage "type"
 
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         self.name = name
         self.cfg = cfg
         self.root_cfg = root_cfg
         self.threshold: float = float(cfg.get("threshold", 0.5))
+
+    @classmethod
+    def from_config(cls, stage_cfg: dict[str, Any], root_cfg: dict[str, Any]) -> GuardBackend:
+        """Registry factory: the stage ``name`` defaults to its ``type`` (one stage per type is the common case)."""
+        return cls(stage_cfg.get("name", cls.registry_name), stage_cfg, root_cfg)
 
     async def startup(self) -> None:  # load weights / open clients
         return None
@@ -78,31 +97,27 @@ class GuardBackend(abc.ABC):
         return v
 
     def describe(self) -> dict[str, Any]:
-        return {"name": self.name, "type": self.type_name, "threshold": self.threshold}
+        return {"name": self.name, "type": self.registry_name, "threshold": self.threshold}
 
 
 # --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
-BACKENDS: dict[str, type[GuardBackend]] = {}
+# Built-in backends are imported on first lookup: configs can name any of them without the caller
+# importing its module, and there is no import cycle (each backend module imports this one).
+BACKENDS: Registry[GuardBackend] = Registry(
+    "guard backend",
+    base=GuardBackend,
+    lazy_modules=[f"{__package__}.{m}" for m in ("regex", "hf_classifier", "openai_guard", "mock")],
+)
 
-
-def register_backend(type_name: str) -> Callable[[type[GuardBackend]], type[GuardBackend]]:
-    def deco(cls: type[GuardBackend]) -> type[GuardBackend]:
-        cls.type_name = type_name
-        BACKENDS[type_name] = cls
-        return cls
-
-    return deco
+#: Backwards-compatible spelling of ``@BACKENDS.register(name)``.
+register_backend = BACKENDS.register
 
 
 def build_backend(stage_cfg: dict[str, Any], root_cfg: dict[str, Any]) -> GuardBackend:
-    from . import hf_classifier, mock, openai_guard, regex  # noqa: F401  (populate registry)
-
-    t = stage_cfg.get("type")
-    if t not in BACKENDS:
-        raise ValueError(f"unknown backend type {t!r}; available: {sorted(BACKENDS)}")
-    return BACKENDS[t](stage_cfg.get("name", t), stage_cfg, root_cfg)
+    """One pipeline stage from its config (``type`` selects the class); unknown types list the available ones."""
+    return BACKENDS.build(stage_cfg, root_cfg)
 
 
 def _content_to_text(content: Any) -> str:

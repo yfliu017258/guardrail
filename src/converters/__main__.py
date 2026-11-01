@@ -15,7 +15,7 @@ import argparse
 import logging
 
 from ..config import get_by_path, load_config, parse_overrides, set_by_path
-from .base import CONVERTERS, get_converter
+from .base import CONVERTERS
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -32,9 +32,8 @@ def main(argv: list[str] | None = None) -> None:
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    from . import datasets as _  # noqa: F401  (populate registry)
     if a.list:
-        for name, cls in sorted(CONVERTERS.items()):
+        for name, cls in CONVERTERS.items():
             print(f"{name:28s} {cls.hf_id or '(local)':55s} license={cls.license} gated={cls.gated}")
         return
 
@@ -50,16 +49,13 @@ def main(argv: list[str] | None = None) -> None:
     if not jobs:
         p.error("nothing to do: pass --dataset or --config with a `datasets:` mapping")
 
-    for name, opts in jobs.items():
+    for name, job in jobs.items():
         for k, v in parse_overrides(a.overrides):
-            set_by_path(opts, k, v)
-        cls = get_converter(opts.pop("converter", name))
-        splits = a.splits or opts.pop("splits", None)
-        limit = a.limit or opts.pop("limit", None)
-        opts.pop("enabled", None)
-        conv = cls(options=opts, raw_dir=raw_dir, revision=a.revision or opts.get("revision"))
-        conv.name = opts.get("name", name)  # same converter class can produce several named outputs
-        conv.run(splits, out_dir, limit)
+            set_by_path(job, k, v)
+        # `converter:` lets one class produce several named outputs (nemotron_safety_v3_zh / _zhtw)
+        conv = CONVERTERS.build(job, type_key="converter", default=name, name=name, raw_dir=raw_dir,
+                                revision=a.revision)
+        conv.run(a.splits or job.get("splits"), out_dir, a.limit or job.get("limit"))
 
 
 if __name__ == "__main__":

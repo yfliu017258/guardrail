@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .base import GuardBackend, GuardInput, Verdict, register_backend
+from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 
 DEFAULT_KEYWORDS = {
     "prompt_injection": ["ignore previous instructions", "ignore all previous", "忽略之前的指令", "忽略以上", "system prompt"],
@@ -16,7 +16,7 @@ DEFAULT_KEYWORDS = {
 }
 
 
-@register_backend("mock")
+@BACKENDS.register("mock")
 class MockBackend(GuardBackend):
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)

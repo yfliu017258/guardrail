@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from ...config import PROJECT_ROOT
-from .base import GuardBackend, GuardInput, Verdict, register_backend
+from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 
 BUILTIN_RULES: list[dict[str, Any]] = [
     {"name": "private_key", "pattern": r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----", "category": "confidential", "action": "block"},
@@ -28,7 +28,7 @@ BUILTIN_RULES: list[dict[str, Any]] = [
 ]
 
 
-@register_backend("regex")
+@BACKENDS.register("regex")
 class RegexBackend(GuardBackend):
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)

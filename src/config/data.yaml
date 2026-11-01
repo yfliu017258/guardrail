@@ -28,6 +28,7 @@ datasets:
 
   # ---------------- over-refusal / multilingual ----------------
   xstest: {}
+  xstest_responses: {}                                       # 5 models x 450 human refusal labels -> validates refusal judges (label = prompt harm)
   or_bench: {}
   multijail_zhtw: {converter: multijail, languages: [zh], opencc: s2twp}
   rtp_lx: {locales: [ZH_Hant, ZH_Hans, EN], threshold: 3.0}  # ODC-BY; NATIVE zh-TW (ZH_Hant)

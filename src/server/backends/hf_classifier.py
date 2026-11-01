@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .base import GuardBackend, GuardInput, Verdict, register_backend
+from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 
 
-@register_backend("hf_classifier")
+@BACKENDS.register("hf_classifier")
 class HFClassifierBackend(GuardBackend):
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)

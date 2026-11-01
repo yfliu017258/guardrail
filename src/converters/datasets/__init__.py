@@ -1,3 +1,5 @@
-"""Importing this package registers every converter (see ``BaseConverter`` / ``register``)."""
+"""Concrete dataset converters, one module per family.
 
-from . import content_safety, injection, local_file, over_refusal, pii  # noqa: F401
+Nothing is imported here: ``CONVERTERS`` (src/converters/base.py) lists these modules as
+``lazy_modules`` and imports them on first lookup. A new module must be added to that list.
+"""

@@ -8,13 +8,35 @@ the span labels are kept in ``meta`` for span-level scoring later.
 
 from __future__ import annotations
 
-from ..base import BaseConverter, register
+from typing import Any
+
+from ..base import Record, register
+from ..sources import HFDatasetSource, HFFilesSource
+from ..templates import TextLabelConverter
 
 SECRET_LABELS = {"secret", "api_key", "password", "pin", "cvv", "http_cookie"}
 
 
+class _SpanPIIConverter(TextLabelConverter):
+    """Span-annotated text: unsafe iff any span survives ``options.ignore_labels`` (and the row is not a
+    marked hard negative); categories follow the span labels."""
+
+    def spans(self, r: Record) -> list[dict[str, Any]]:
+        ignore = set(self.options.get("ignore_labels", []))
+        return [s for s in (r.get("spans") or []) if s.get("label") not in ignore]
+
+    def span_labels(self, r: Record) -> list[str]:
+        return sorted({s.get("label") for s in self.spans(r)})
+
+    def is_unsafe(self, r: Record) -> bool:
+        return bool(self.spans(r)) and not r.get("is_negative", False)
+
+    def categories(self, r: Record) -> list[str]:
+        return sorted({"confidential" if lbl in SECRET_LABELS else "privacy_pii" for lbl in self.span_labels(r)})
+
+
 @register("tw_pii_bench")
-class TwPIIBench(BaseConverter):
+class TwPIIBench(HFDatasetSource, _SpanPIIConverter):
     """lianghsun/tw-PII-bench: the only verified zh-TW PII set (身分證 / 健保卡 / 統編 / 車牌 ... + 40 hard negatives).
     LLM-generated, ~5-10% human checked — test-only. Option ``ignore_labels`` (e.g. [private_date])."""
 
@@ -22,37 +44,22 @@ class TwPIIBench(BaseConverter):
     hf_id = "lianghsun/tw-PII-bench"
     license = "apache-2.0"
     default_splits = ("short", "mid", "long")
+    language = "zh-TW"
 
-    def convert(self, r, split, idx):
-        ignore = set(self.options.get("ignore_labels", []))
-        spans = [s for s in (r.get("spans") or []) if s.get("label") not in ignore]
-        unsafe = bool(spans) and not r.get("is_negative", False)
-        labels = sorted({s.get("label") for s in spans})
-        cats = sorted({"confidential" if lbl in SECRET_LABELS else "privacy_pii" for lbl in labels}) if unsafe else []
-        return self.sample(split="test", prompt=r["text"], label="unsafe" if unsafe else "safe", categories=cats,
-                           language="zh-TW", meta={"id": r.get("id"), "length_bucket": split, "category": r.get("category"),
-                                                   "labels": labels, "spans": spans})
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"id": r.get("id"), "length_bucket": self.current_split, "category": r.get("category"),
+                "labels": self.span_labels(r), "spans": self.spans(r)}
 
 
 @register("seatbelt_pii_heldout")
-class SeatbeltPIIHeldout(BaseConverter):
+class SeatbeltPIIHeldout(HFFilesSource, _SpanPIIConverter):
     """cjhwong/seatbelt-pii-tagger-data held-out files (zh-Hant / zh-Hans / en + regex-generated secrets).
     Viewer is broken -> files loaded directly. Option ``files`` overrides the default held-out files."""
 
     hf_id = "cjhwong/seatbelt-pii-tagger-data"
     license = "apache-2.0"
     default_splits = ("test",)
+    data_files = ("synthetic/heldout.jsonl", "synthetic/rule_secrets/heldout.jsonl")
 
-    def load_raw(self, split):
-        from datasets import load_dataset
-
-        files = self.options.get("files", ["synthetic/heldout.jsonl", "synthetic/rule_secrets/heldout.jsonl"])
-        return load_dataset(self.hf_id, data_files={"test": files}, split="test", revision=self.revision)
-
-    def convert(self, r, split, idx):
-        spans = r.get("spans") or []
-        labels = sorted({s.get("label") for s in spans})
-        unsafe = bool(spans)
-        cats = sorted({"confidential" if lbl in SECRET_LABELS else "privacy_pii" for lbl in labels}) if unsafe else []
-        return self.sample(split="test", prompt=r["text"], label="unsafe" if unsafe else "safe", categories=cats,
-                           meta={"labels": labels, "rule": r.get("rule"), "script": r.get("script")})
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"labels": self.span_labels(r), "rule": r.get("rule"), "script": r.get("script")}

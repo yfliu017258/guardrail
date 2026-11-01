@@ -3,6 +3,7 @@
     CONVERTERS      src/converters/base.py       dataset -> GuardrailSample
     PARSERS         src/server/backends/parsers.py  guard-model output -> verdict
     BACKENDS        src/server/backends/base.py  guard stage implementations
+    PROMPT_BUILDERS src/server/backends/prompts.py  how a guard model is prompted
     TARGETS         src/evaluation/targets.py    what a guardrail eval talks to
     TASKS           src/evaluation/tasks/base.py guardrail / refusal_judge / model_safety
     GENERATORS      src/evaluation/generation.py bare-model clients
@@ -97,6 +98,12 @@ class Registry(Generic[T]):
         cls = self.get(name)
         factory = getattr(cls, "from_config", None)
         return factory(cfg, *args, **kwargs) if callable(factory) else cls(cfg, *args, **kwargs)  # type: ignore[call-arg]
+
+    @property
+    def import_errors(self) -> dict[str, str]:
+        """Plug-in modules that failed to import (module -> error). CLIs should print these."""
+        self._load()
+        return dict(self._import_errors)
 
     def names(self) -> list[str]:
         self._load()

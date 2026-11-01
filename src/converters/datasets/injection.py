@@ -8,177 +8,207 @@ respect to injection, so do not mix them into content-safety recall numbers.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, ClassVar
 
 from ...data_schema.taxonomy import HARMBENCH_MAP, JBB_MAP
-from ..base import BaseConverter, register
+from ..base import Record, register
+from ..sources import HFDatasetSource, MultiConfigHFSource
+from ..templates import SafeOnlyConverter, TextLabelConverter, UnsafeOnlyConverter
 
 
 @register("pi_eval_suite")
-class PIEvalSuite(BaseConverter):
+class PIEvalSuite(MultiConfigHFSource, TextLabelConverter):
     """Horizon-Labs/prompt-injection-eval-suite: 16 configs, unified schema (text, label, source, kind, lang).
     Option ``configs`` picks subsets; ``synthetic_*`` are in-distribution for the publisher's own model."""
 
     hf_id = "Horizon-Labs/prompt-injection-eval-suite"
     license = "mixed (per config: MIT / Apache-2.0 / CC-BY-4.0 / CC-BY-SA-4.0)"
     default_splits = ("test",)
-    DEFAULT_CONFIGS = ["notinject", "xstest", "orbench_hard", "deepset_test", "jackhhao_test", "boundary_pairs_test",
-                       "neuralchemy_test", "bipia", "piarena", "llmail_phase2"]
+    default_configs = ("notinject", "xstest", "orbench_hard", "deepset_test", "jackhhao_test", "boundary_pairs_test",
+                       "neuralchemy_test", "bipia", "piarena", "llmail_phase2")
+    skip_blank_text = True
+    JAILBREAK_CONFIGS: ClassVar[frozenset[str]] = frozenset({"jackhhao_test", "simsonsun_jailbreaks"})
 
-    def load_raw(self, split: str) -> Iterable[dict[str, Any]]:
-        from datasets import load_dataset
+    @staticmethod
+    def _source(r: Record) -> str:
+        return str(r.get("source") or r["_config"])
 
-        for cfg in self.options.get("configs", self.DEFAULT_CONFIGS):
-            for r in load_dataset(self.hf_id, cfg, split=split, revision=self.revision):
-                yield {**r, "_config": cfg}
+    def _is_jailbreak(self, r: Record) -> bool:
+        return "jailbreak" in self._source(r) or r["_config"] in self.JAILBREAK_CONFIGS
 
-    def convert(self, r, split, idx):
-        text = (r.get("text") or "").strip()
-        if not text:
+    def categories(self, r: Record) -> list[str]:
+        return ["jailbreak" if self._is_jailbreak(r) else "prompt_injection"]
+
+    def attack(self, r: Record, unsafe: bool) -> str | None:
+        if not unsafe:
             return None
-        unsafe = int(r.get("label", 0)) == 1
-        kind = r.get("kind") or "direct"
-        src = str(r.get("source") or r["_config"])
-        is_jb = "jailbreak" in src or r["_config"] in ("jackhhao_test", "simsonsun_jailbreaks")
-        cat = "jailbreak" if is_jb else "prompt_injection"
-        return self.sample(split=split, prompt=text, label="unsafe" if unsafe else "safe",
-                           categories=[cat] if unsafe else [],
-                           attack_type=(("indirect" if kind == "indirect" else ("jailbreak" if is_jb else "direct")) if unsafe else None),
-                           language=r.get("lang") if r.get("lang") in ("en", "zh-TW", "zh-CN") else "auto",
-                           meta={"config": r["_config"], "source": src, "kind": kind})
+        if (r.get("kind") or "direct") == "indirect":
+            return "indirect"
+        return "jailbreak" if self._is_jailbreak(r) else "direct"
+
+    def lang(self, r: Record) -> str:
+        return r["lang"] if r.get("lang") in ("en", "zh-TW", "zh-CN") else "auto"
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"config": r["_config"], "source": self._source(r), "kind": r.get("kind") or "direct"}
 
 
 @register("notinject")
-class NotInject(BaseConverter):
+class NotInject(HFDatasetSource, SafeOnlyConverter):
     """Over-defense benchmark: benign prompts full of injection trigger words. All safe -> measures FPR."""
 
     output_split = "test"
     hf_id = "leolee99/NotInject"
     license = "mit"
     default_splits = ("NotInject_one", "NotInject_two", "NotInject_three")
+    text_field = "prompt"
 
-    def convert(self, r, split, idx):
-        return self.sample(split="test", prompt=r["prompt"], label="safe",
-                           meta={"category": r.get("category"), "trigger_words": r.get("word_list"), "orig_split": split})
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"category": r.get("category"), "trigger_words": r.get("word_list"), "orig_split": self.current_split}
 
 
 @register("boundary_pairs")
-class BoundaryPairs(BaseConverter):
+class BoundaryPairs(HFDatasetSource, TextLabelConverter):
     """Minimal benign/attack pairs sharing vocabulary — the sharpest keyword-FP test."""
 
     hf_id = "3nesdeniz/agentic-prompt-injection-boundary-pairs"
     license = "cc-by-4.0"
     default_splits = ("test",)
 
-    def convert(self, r, split, idx):
-        unsafe = int(r.get("label", 0)) == 1
-        fam = r.get("attack_family") or ""
-        cat = "jailbreak" if "jailbreak" in fam else "prompt_injection"
-        return self.sample(split=split, prompt=r["text"], label="unsafe" if unsafe else "safe",
-                           categories=[cat] if unsafe else [],
-                           attack_type=("indirect" if ("indirect" in fam or "rag" in fam) else fam or "direct") if unsafe else None,
-                           meta={"pair_id": r.get("pair_id"), "attack_family": fam, "risk_domain": r.get("risk_domain")})
+    @staticmethod
+    def _family(r: Record) -> str:
+        return r.get("attack_family") or ""
+
+    def categories(self, r: Record) -> list[str]:
+        return ["jailbreak" if "jailbreak" in self._family(r) else "prompt_injection"]
+
+    def attack(self, r: Record, unsafe: bool) -> str | None:
+        if not unsafe:
+            return None
+        fam = self._family(r)
+        return "indirect" if ("indirect" in fam or "rag" in fam) else (fam or "direct")
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"pair_id": r.get("pair_id"), "attack_family": self._family(r), "risk_domain": r.get("risk_domain")}
 
 
 @register("neuralchemy_pi")
-class NeuralchemyPI(BaseConverter):
+class NeuralchemyPI(HFDatasetSource, TextLabelConverter):
+    """neuralchemy prompt-injection set (``core`` config); its ``category`` names the attack technique."""
+
     hf_id = "neuralchemy/Prompt-injection-dataset"
     hf_config = "core"
     license = "apache-2.0 (mixed upstream)"
     default_splits = ("test",)
-    JB = {"jailbreak", "persona_replacement", "many_shot", "crescendo"}
+    JB: ClassVar[frozenset[str]] = frozenset({"jailbreak", "persona_replacement", "many_shot", "crescendo"})
 
-    def convert(self, r, split, idx):
-        unsafe = int(r.get("label", 0)) == 1
-        c = r.get("category") or ""
-        return self.sample(split=split, prompt=r["text"], label="unsafe" if unsafe else "safe",
-                           categories=(["jailbreak" if c in self.JB else "prompt_injection"] if unsafe else []),
-                           attack_type=(c or "direct") if unsafe else None,
-                           meta={"category": c, "source": r.get("source"), "severity": r.get("severity")})
+    def categories(self, r: Record) -> list[str]:
+        return ["jailbreak" if (r.get("category") or "") in self.JB else "prompt_injection"]
+
+    def attack(self, r: Record, unsafe: bool) -> str | None:
+        return (r.get("category") or "direct") if unsafe else None
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"category": r.get("category") or "", "source": r.get("source"), "severity": r.get("severity")}
 
 
 @register("deepset_prompt_injections")
-class DeepsetPI(BaseConverter):
+class DeepsetPI(HFDatasetSource, TextLabelConverter):
     """Classic small baseline (en/de). Noisy labels and widely trained on — sanity check only."""
 
     hf_id = "deepset/prompt-injections"
     license = "apache-2.0"
     default_splits = ("test",)
-
-    def convert(self, r, split, idx):
-        unsafe = int(r["label"]) == 1
-        return self.sample(split=split, prompt=r["text"], label="unsafe" if unsafe else "safe",
-                           categories=["prompt_injection"] if unsafe else [], attack_type="direct" if unsafe else None)
+    category = "prompt_injection"
+    attack_type = "direct"
 
 
 @register("jackhhao_jailbreak")
-class JackhhaoJailbreak(BaseConverter):
+class JackhhaoJailbreak(HFDatasetSource, TextLabelConverter):
+    """jackhhao/jailbreak-classification: ``type`` jailbreak vs benign prompts."""
+
     hf_id = "jackhhao/jailbreak-classification"
     license = "apache-2.0"
     default_splits = ("test",)
-
-    def convert(self, r, split, idx):
-        unsafe = r.get("type") == "jailbreak"
-        return self.sample(split=split, prompt=r["prompt"], label="unsafe" if unsafe else "safe",
-                           categories=["jailbreak"] if unsafe else [], attack_type="jailbreak" if unsafe else None)
+    text_field = "prompt"
+    label_field = "type"
+    positive_values = frozenset({"jailbreak"})
+    category = "jailbreak"
+    attack_type = "jailbreak"
 
 
 @register("in_the_wild_jailbreak")
-class InTheWildJailbreak(BaseConverter):
-    """TrustAIRLab: jailbreak_* configs -> unsafe, regular_* -> safe role-play hard negatives. Dedupe advised."""
+class InTheWildJailbreak(MultiConfigHFSource, TextLabelConverter):
+    """TrustAIRLab: jailbreak_* configs -> unsafe, regular_* -> safe role-play hard negatives. Dedupe advised.
+    Option ``date`` picks the snapshot (config suffix)."""
 
     output_split = "test"
     hf_id = "TrustAIRLab/in-the-wild-jailbreak-prompts"
     license = "mit"
     default_splits = ("train",)
+    text_field = "prompt"
+    category = "jailbreak"
+    attack_type = "roleplay"
 
-    def load_raw(self, split: str) -> Iterable[dict[str, Any]]:
-        from datasets import load_dataset
-
+    def configs(self) -> list[str]:
         date = self.options.get("date", "2023_12_25")
-        for kind in ("jailbreak", "regular"):
-            for r in load_dataset(self.hf_id, f"{kind}_{date}", split=split, revision=self.revision):
-                yield {**r, "_kind": kind}
+        return [f"{kind}_{date}" for kind in ("jailbreak", "regular")]
 
-    def convert(self, r, split, idx):
-        unsafe = r["_kind"] == "jailbreak" and bool(r.get("jailbreak", True))
-        return self.sample(split="test", prompt=r["prompt"], label="unsafe" if unsafe else "safe",
-                           categories=["jailbreak"] if unsafe else [], attack_type="roleplay" if unsafe else None,
-                           meta={"platform": r.get("platform"), "source": r.get("source")})
+    def is_unsafe(self, r: Record) -> bool:
+        return r["_config"].startswith("jailbreak_") and bool(r.get("jailbreak", True))
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"platform": r.get("platform"), "source": r.get("source")}
 
 
 @register("jbb_behaviors")
-class JBBBehaviors(BaseConverter):
-    """100 harmful goals + 100 topic-matched benign goals (content safety, not jailbreak wrappers)."""
+class JBBBehaviors(HFDatasetSource, TextLabelConverter):
+    """100 harmful goals + 100 topic-matched benign goals (content safety, not jailbreak wrappers).
+    The source split is the label."""
 
     output_split = "test"
     hf_id = "JailbreakBench/JBB-Behaviors"
     hf_config = "behaviors"
     license = "mit"
     default_splits = ("harmful", "benign")
+    text_field = "Goal"
 
-    def convert(self, r, split, idx):
-        unsafe = split == "harmful"
-        return self.sample(split="test", prompt=r["Goal"], label="unsafe" if unsafe else "safe",
-                           categories=[JBB_MAP.get(str(r.get("Category", "")).lower(), "other")] if unsafe else [],
-                           meta={"behavior": r.get("Behavior"), "category": r.get("Category"), "orig_split": split})
+    def is_unsafe(self, r: Record) -> bool:
+        return self.current_split == "harmful"
+
+    def categories(self, r: Record) -> list[str]:
+        return [JBB_MAP.get(str(r.get("Category", "")).lower(), "other")]
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"behavior": r.get("Behavior"), "category": r.get("Category"), "orig_split": self.current_split}
 
 
 @register("harmbench")
-class HarmBench(BaseConverter):
-    """Ungated mirror of HarmBench behaviours (unsafe-only -> recall). Copyright rows dropped by default."""
+class HarmBench(HFDatasetSource, UnsafeOnlyConverter):
+    """Ungated mirror of HarmBench behaviours (unsafe-only -> recall). Copyright rows dropped by default
+    (``keep_copyright: true`` keeps them); contextual behaviours get their context prepended."""
 
     hf_id = "swiss-ai/harmbench"
     hf_config = "DirectRequest"
     license = "mit (upstream)"
     default_splits = ("test",)
 
-    def convert(self, r, split, idx):
-        if r.get("FunctionalCategory") == "copyright" and not self.options.get("keep_copyright", False):
-            return None
-        ctx = (r.get("ContextString") or "").strip()
-        prompt = f"{ctx}\n\n{r['Behavior']}" if ctx else r["Behavior"]
-        return self.sample(split=split, prompt=prompt, label="unsafe",
-                           categories=[HARMBENCH_MAP.get(str(r.get("SemanticCategory", "")).lower(), "other")],
-                           attack_type="contextual" if ctx else None,
-                           meta={"behavior_id": r.get("BehaviorID"), "functional": r.get("FunctionalCategory")})
+    @staticmethod
+    def _context(r: Record) -> str:
+        return (r.get("ContextString") or "").strip()
+
+    def keep(self, r: Record) -> bool:
+        return r.get("FunctionalCategory") != "copyright" or bool(self.options.get("keep_copyright", False))
+
+    def text(self, r: Record) -> str:
+        ctx = self._context(r)
+        return f"{ctx}\n\n{r['Behavior']}" if ctx else r["Behavior"]
+
+    def categories(self, r: Record) -> list[str]:
+        return [HARMBENCH_MAP.get(str(r.get("SemanticCategory", "")).lower(), "other")]
+
+    def attack(self, r: Record, unsafe: bool) -> str | None:
+        return "contextual" if self._context(r) else None
+
+    def meta(self, r: Record) -> dict[str, Any]:
+        return {"behavior_id": r.get("BehaviorID"), "functional": r.get("FunctionalCategory")}
