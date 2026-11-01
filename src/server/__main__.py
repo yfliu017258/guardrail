@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = load_config(args.config, vars(args), ARG_TO_KEY, args.overrides, args.env_file, run_kind="server")
     level = str(get_by_path(cfg, "server.log_level", "info")).upper()
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs every URL (incl. user:pw@) at INFO
     if not args.no_snapshot:
         run_dir = make_run_dir(cfg, root=get_by_path(cfg, "run.output_dir", "results/server"),
                                name=get_by_path(cfg, "run.name", "server"))

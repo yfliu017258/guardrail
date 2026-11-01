@@ -15,7 +15,10 @@ def test_smoke_run_and_resume(tmp_path):
     main(["--resume", str(run_dir), "--env-file", "/nonexistent"])
     assert (run_dir / "predictions.jsonl").read_text() == before
     main(["--rescore", str(run_dir), "--set", "metrics.threshold=0.9"])
-    assert (run_dir / "rescore_0.9" / "metrics.json").exists()
+    (sub,) = [p for p in run_dir.iterdir() if p.name.startswith("rescore_0.9_")]
+    assert (sub / "metrics.json").exists() and (sub / "config.yaml").exists()
+    main(["--rescore", str(run_dir), "--threshold", "0.2"])          # mapped flags work on rescore too
+    assert any(p.name.startswith("rescore_0.2_") for p in run_dir.iterdir())
 
 
 def test_reproducible_sampling(tmp_path):

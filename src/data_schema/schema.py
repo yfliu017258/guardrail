@@ -14,6 +14,8 @@ CSV columns (``CSV_COLUMNS``)::
   output (post_call). For ``response`` rows the ``prompt`` is context only.
 * ``label`` is the *ground truth for the judged side*.
 * ``categories`` is ``|``-joined ``Category`` values (empty for safe rows).
+* ``refusal_label`` (response rows only, optional): did the response refuse?
+  ``refusal`` / ``partial`` / ``compliance`` — ground truth for validating refusal judges.
 * ``meta`` is a JSON object string holding anything source-specific
   (original label, sub-category, toxicity score, ...).
 """
@@ -59,6 +61,7 @@ class Category(str, Enum):
 
 
 InputType = Literal["request", "response"]
+RefusalLabel = Literal["refusal", "partial", "compliance"]
 LANGUAGES = ("en", "zh-TW", "zh-CN", "zh", "ja", "ko", "mixed", "other", "unknown")
 
 CSV_COLUMNS = [
@@ -72,8 +75,10 @@ CSV_COLUMNS = [
     "categories",
     "language",
     "attack_type",
+    "refusal_label",
     "meta",
 ]
+OPTIONAL_COLUMNS = {"refusal_label"}  # older CSVs without these still load
 
 
 class GuardrailSample(BaseModel):
@@ -89,6 +94,7 @@ class GuardrailSample(BaseModel):
     categories: list[Category] = Field(default_factory=list)
     language: str = "unknown"
     attack_type: str | None = None   # e.g. direct / indirect / roleplay / obfuscation / multi_turn
+    refusal_label: RefusalLabel | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
     # -- validation ------------------------------------------------------- #
@@ -125,6 +131,8 @@ class GuardrailSample(BaseModel):
             raise ValueError("input_type=request requires a non-empty prompt")
         if self.label == Label.SAFE and self.categories:
             raise ValueError("safe samples must not carry unsafe categories")
+        if self.refusal_label is not None and not self.response:
+            raise ValueError("refusal_label needs a response")
         if not self.sample_id:
             self.sample_id = self.content_hash()
         return self
@@ -158,6 +166,7 @@ class GuardrailSample(BaseModel):
             "categories": "|".join(c.value for c in self.categories),
             "language": self.language,
             "attack_type": self.attack_type or "",
+            "refusal_label": self.refusal_label or "",
             "meta": json.dumps(self.meta, ensure_ascii=False, sort_keys=True) if self.meta else "",
         }
 
@@ -189,7 +198,7 @@ def iter_csv(path: str | Path) -> Iterator[GuardrailSample]:
     csv.field_size_limit(1 << 30)
     with Path(path).open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        missing = set(CSV_COLUMNS) - set(reader.fieldnames or [])
+        missing = set(CSV_COLUMNS) - OPTIONAL_COLUMNS - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"{path}: missing columns {sorted(missing)}")
         for i, row in enumerate(reader):

@@ -1,0 +1,9 @@
+# GPU-free: keyword judge on the bundled sample responses (which carry refusal_label).
+_base_: smoke.yaml
+run: {name: smoke-refusal-judge}
+task:
+  type: refusal_judge
+  refusal_judge:
+    judge: {type: keyword}
+data:
+  input_types: [response]

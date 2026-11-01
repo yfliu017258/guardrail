@@ -31,7 +31,12 @@ DEFAULT_BLOCK_MESSAGE = (
 
 def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> FastAPI:
     pipeline = pipeline or GuardPipeline(cfg)
-    expected_key = env(cfg, get_by_path(cfg, "server.api_key_env"))
+    key_env = get_by_path(cfg, "server.api_key_env")
+    expected_key = env(cfg, key_env)
+    if key_env and not expected_key and not get_by_path(cfg, "server.allow_no_auth", False):
+        # auth was configured but the secret is missing: refuse to start rather than serve unauthenticated
+        raise RuntimeError(f"server.api_key_env={key_env} is set but the variable is empty/missing "
+                           "(set it, or set server.api_key_env: null / server.allow_no_auth: true explicitly)")
     block_template = get_by_path(cfg, "server.block_message", DEFAULT_BLOCK_MESSAGE)
     expose_categories = bool(get_by_path(cfg, "server.expose_categories", True))
     log_text = bool(get_by_path(cfg, "server.log_text", False))  # prompts may contain confidential data
@@ -94,8 +99,14 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
                 action="BLOCKED",
                 blocked_reason=block_template.format(categories=cats, call_id=req.litellm_call_id or "-"),
             )
-        if res.masked_texts is not None and len(res.masked_texts) == len(req.texts or []):
-            return LiteLLMGuardrailResponse(action="GUARDRAIL_INTERVENED", texts=res.masked_texts)
+        if res.masked_texts is not None:
+            if len(res.masked_texts) == len(req.texts or []):
+                return LiteLLMGuardrailResponse(action="GUARDRAIL_INTERVENED", texts=res.masked_texts)
+            # LiteLLM replaces texts positionally; a misaligned list cannot be applied safely -> fail closed
+            log.warning("mask result not aligned with request texts (%d vs %d); blocking",
+                        len(res.masked_texts), len(req.texts or []))
+            return LiteLLMGuardrailResponse(action="BLOCKED", blocked_reason=block_template.format(
+                categories="sensitive data", call_id=req.litellm_call_id or "-"))
         return LiteLLMGuardrailResponse(action="NONE")
 
     @app.post("/v1/classify", response_model=ClassifyResponse, dependencies=[Depends(auth)])

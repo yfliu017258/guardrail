@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .metrics import final_decisions, gold_of, pred_of
+
 
 def _fmt(v: Any) -> str:
     if v is None:
@@ -30,13 +32,16 @@ def write_slices_csv(run_dir: Path, metrics: dict[str, Any]) -> None:
                 w.writerow({"slice": key, "value": val, **m})
 
 
-def write_errors(run_dir: Path, rows: list[dict], n: int) -> None:
+def write_errors(run_dir: Path, rows: list[dict], n: int, cfg: dict | None = None) -> None:
     """False positives / negatives for manual review — the most useful file in the run directory."""
-    cols = ["kind", "sample_id", "source", "language", "input_type", "gold_categories", "categories",
-            "score", "blocked_by", "text_preview", "raw", "error"]
-    fps = [r for r in rows if r.get("unsafe") is True and r["gold_label"] == "safe"]
-    fns = [r for r in rows if r.get("unsafe") is False and r["gold_label"] == "unsafe"]
-    errs = [r for r in rows if r.get("unsafe") is None]
+    cols = ["kind", "sample_id", "source", "language", "input_type", "gold_label", "gold_categories",
+            "gold_refusal_label", "refusal_label", "categories", "score", "blocked_by", "judge", "judge_reason",
+            "text_preview", "response", "raw", "error"]
+    m = (cfg or {}).get("metrics", {}) or {}
+    decided = final_decisions(rows, m.get("threshold"), "exclude", m.get("score_stage"))  # same rule as the metrics
+    fps = [r for r in rows if decided.get(r.get("sample_id")) is True and not gold_of(r)]
+    fns = [r for r in rows if decided.get(r.get("sample_id")) is False and gold_of(r)]
+    errs = [r for r in rows if pred_of(r) is None]
     # most confident mistakes first
     fps.sort(key=lambda r: -(r.get("score") or 0))
     fns.sort(key=lambda r: (r.get("score") or 0))
@@ -50,8 +55,23 @@ def write_errors(run_dir: Path, rows: list[dict], n: int) -> None:
                             "blocked_by": "|".join(r.get("blocked_by") or [])})
 
 
+DEFAULT_LABELS = {"precision": "precision", "recall": "recall", "fpr": "FPR"}
+
+
+def _header(desc: dict) -> str:
+    task = desc.get("task", "guardrail")
+    if task == "model_safety":
+        g, j = desc.get("generator") or {}, desc.get("judge") or {}
+        return f"- task: `model_safety`  model: `{g.get('model')}` (gen fingerprint `{g.get('fingerprint')}`)  judge: `{j.get('type')}`"
+    if task == "refusal_judge":
+        return f"- task: `refusal_judge`  judge: `{(desc.get('judge') or {}).get('type', desc.get('judge_config', {}).get('type'))}`"
+    stages = ", ".join(s.get("name", "?") for s in desc.get("stages", [])) or "-"
+    return f"- task: `guardrail`  target: `{desc.get('type')}`  stages: {stages}"
+
+
 def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict[str, Any], target_desc: dict) -> str:
     o = metrics["overall"]
+    labels = {**DEFAULT_LABELS, **(metrics.get("metric_labels") or {})}
     ci = metrics.get("ci", {})
     lat = metrics.get("latency_ms", {})
 
@@ -61,9 +81,9 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
 
     meta = cfg.get("meta", {})
     lines = [
-        f"# Guardrail eval — {cfg.get('run', {}).get('name', 'run')}",
+        f"# Eval [{metrics.get('task', 'guardrail')}] — {cfg.get('run', {}).get('name', 'run')}",
         "",
-        f"- target: `{target_desc.get('type')}`  stages: {', '.join(s.get('name', '?') for s in target_desc.get('stages', [])) or '-'}",
+        _header(target_desc),
         f"- config_hash: `{meta.get('config_hash', '-')}`  git: `{(meta.get('git') or {}).get('commit', '-')}`"
         f"{' (dirty)' if (meta.get('git') or {}).get('dirty') else ''}",
         f"- samples: {metrics['n_scored']}/{metrics['n_total']} scored  "
@@ -74,10 +94,10 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         "",
         "| metric | value (95% CI) |",
         "|---|---|",
-        f"| precision | {with_ci('precision')} |",
-        f"| recall (block rate on unsafe) | {with_ci('recall')} |",
+        f"| {labels['precision']} | {with_ci('precision')} |",
+        f"| {labels['recall']} | {with_ci('recall')} |",
         f"| F1 | {with_ci('f1')} |",
-        f"| FPR (false block rate on safe) | {with_ci('fpr')} |",
+        f"| {labels['fpr']} | {with_ci('fpr')} |",
         f"| balanced accuracy | {_fmt(o.get('balanced_accuracy'))} |",
         f"| TP / FP / FN / TN | {o['tp']} / {o['fp']} / {o['fn']} / {o['tn']} |",
         f"| latency p50 / p95 / p99 (ms) | {_fmt(lat.get('p50'))} / {_fmt(lat.get('p95'))} / {_fmt(lat.get('p99'))} |",
@@ -90,6 +110,24 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         ]
         for k, v in sm["recall_at_fpr"].items():
             lines.append(f"| recall @ FPR≤{k} | {_fmt(v['recall'])} (th {_fmt(v['threshold'])}) |")
+    ms = metrics.get("model_safety")
+    if ms:
+        lines += ["", "## Model safety", "", "| metric | value |", "|---|---|"]
+        for k in ("n_unsafe_prompts", "n_safe_prompts", "refusal_rate_unsafe", "attack_success_rate", "partial_rate_unsafe",
+                  "over_refusal_rate_safe", "harmful_response_rate_unsafe", "harmful_given_not_refused", "blocked_rate",
+                  "empty_response_rate", "truncated_rate"):
+            if k in ms:
+                lines.append(f"| {k} | {_fmt(ms[k])} |")
+        lines += ["", f"label distribution: `{json.dumps(ms.get('label_distribution'), ensure_ascii=False)}`"]
+        if ms.get("refusal_rate_by_category"):
+            lines += ["", "| unsafe category | n | refusal rate |", "|---|---|---|"]
+            lines += [f"| {c} | {v['n']} | {_fmt(v['refusal_rate'])} |" for c, v in ms["refusal_rate_by_category"].items()]
+    if metrics.get("label_confusion"):
+        conf = metrics["label_confusion"]
+        cols = list(next(iter(conf.values())).keys())
+        lines += ["", f"## Judge label confusion (rows = gold, cols = judged; kappa {_fmt(metrics.get('label_kappa'))})", "",
+                  "| gold \\ judged | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
+        lines += [f"| {g} | " + " | ".join(str(row[c]) for c in cols) + " |" for g, row in conf.items()]
     if metrics.get("contamination"):
         c = metrics["contamination"]
         lines += ["", "## Contamination", "",
@@ -101,9 +139,13 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
                       f"| without contaminated sources | {co['n']} | {_fmt(co['precision'])} | {_fmt(co['recall'])} | "
                       f"{_fmt(co['f1'])} | {_fmt(co['fpr'])} |"]
     if metrics.get("per_stage"):
-        lines += ["", "## Per stage (each stage alone)", "", "| stage | precision | recall | F1 | FPR | AUROC |", "|---|---|---|---|---|---|"]
+        full = all((m.get("coverage") or 0) >= 0.999 for m in metrics["per_stage"].values())
+        title = "each stage alone" if full else "CONDITIONAL on reaching the stage (short-circuit) — use run_all for standalone numbers"
+        lines += ["", f"## Per stage ({title})", "", "| stage | n | coverage | precision | recall | F1 | FPR | AUROC |",
+                  "|---|---|---|---|---|---|---|---|"]
         for st, m in metrics["per_stage"].items():
-            lines.append(f"| {st} | {_fmt(m['precision'])} | {_fmt(m['recall'])} | {_fmt(m['f1'])} | {_fmt(m['fpr'])} | {_fmt(m.get('auroc'))} |")
+            lines.append(f"| {st} | {m['n']} | {_fmt(m.get('coverage'))} | {_fmt(m['precision'])} | {_fmt(m['recall'])} | "
+                         f"{_fmt(m['f1'])} | {_fmt(m['fpr'])} | {_fmt(m.get('auroc'))} |")
     for key, groups in metrics.get("slices", {}).items():
         if not groups:
             continue
@@ -123,5 +165,5 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
 def write_report(run_dir: Path, metrics: dict, cfg: dict, manifest: dict, target_desc: dict, rows: list[dict]) -> None:
     write_metrics(run_dir, metrics)
     write_slices_csv(run_dir, metrics)
-    write_errors(run_dir, rows, int(cfg.get("report", {}).get("n_error_examples", 100)))
+    write_errors(run_dir, rows, int(cfg.get("report", {}).get("n_error_examples", 100)), cfg)
     (run_dir / "report.md").write_text(render_markdown(metrics, cfg, manifest, target_desc), encoding="utf-8")

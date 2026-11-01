@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob as _glob
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -20,7 +21,7 @@ def _expand(files: list[str]) -> list[Path]:
     out: list[Path] = []
     for f in files:
         if any(ch in f for ch in "*?["):
-            matches = sorted(PROJECT_ROOT.glob(f))
+            matches = sorted(Path(m) for m in _glob.glob(f)) if Path(f).is_absolute() else sorted(PROJECT_ROOT.glob(f))
             if not matches:
                 raise FileNotFoundError(f"glob matched nothing: {f}")
             out.extend(matches)
@@ -45,22 +46,43 @@ def sample_rows(rows: list[GuardrailSample], n: int | None, strategy: str, seed:
         groups = defaultdict(list)
         for r in rows:
             groups[r.label.value].append(r)
-        per = n // max(len(groups), 1)
-        out = []
-        for k in sorted(groups):
-            g = groups[k]
-            out += rng.sample(g, min(per, len(g)))
-        return out
-    groups: dict[tuple, list[GuardrailSample]] = defaultdict(list)
-    for r in rows:
-        groups[(r.label.value, r.input_type)].append(r)
+        quotas = _allocate(n, {k: len(v) for k, v in groups.items()}, equal=True)
+    else:
+        groups = defaultdict(list)
+        for r in rows:
+            groups[(r.label.value, r.input_type)].append(r)
+        quotas = _allocate(n, {k: len(v) for k, v in groups.items()})
     out = []
     for key in sorted(groups):
-        g = groups[key]
-        k = max(1, round(n * len(g) / len(rows)))
-        out += rng.sample(g, min(k, len(g)))
-    rng.shuffle(out)
-    return out[:n]
+        out += rng.sample(groups[key], quotas[key])
+    rng.shuffle(out)  # a later `limit` / partial run must not see one class only
+    return out
+
+
+def _allocate(n: int, sizes: dict, equal: bool = False) -> dict:
+    """Largest-remainder allocation that sums to exactly n (capped by availability), >=1 per stratum when n allows."""
+    keys = sorted(sizes)
+    total = sum(sizes.values())
+    if equal:
+        want = {k: n / len(keys) for k in keys}
+    else:
+        want = {k: n * sizes[k] / total for k in keys}
+    quota = {k: min(sizes[k], int(want[k])) for k in keys}
+    if n >= len(keys):
+        for k in keys:
+            quota[k] = max(quota[k], 1)
+    # hand out what is left by largest remainder, then to any stratum with spare rows
+    order = sorted(keys, key=lambda k: (want[k] - int(want[k])), reverse=True)
+    while sum(quota.values()) < n:
+        spare = [k for k in order if quota[k] < sizes[k]]
+        if not spare:
+            break
+        quota[spare[0]] += 1
+        order = order[1:] + order[:1]
+    while sum(quota.values()) > n:  # the >=1 floor can overshoot when n is tiny
+        k = max(keys, key=lambda k: quota[k])
+        quota[k] -= 1
+    return quota
 
 
 def load_eval_set(cfg: dict[str, Any]) -> tuple[list[GuardrailSample], dict[str, Any]]:
@@ -92,14 +114,19 @@ def load_eval_set(cfg: dict[str, Any]) -> tuple[list[GuardrailSample], dict[str,
             "sha256": file_sha256(path), "rows_in_file": n_raw, "rows_used": len(rows),
         })
 
-    if get_by_path(cfg, "data.dedupe", True):
-        seen, uniq = set(), []
-        for s in samples:
-            if s.sample_id not in seen:
-                seen.add(s.sample_id)
-                uniq.append(s)
-        manifest["duplicates_dropped"] = len(samples) - len(uniq)
-        samples = uniq
+    ids: dict[str, str] = {}
+    for smp in samples:  # results are keyed by sample_id: the same id with two labels would be silently merged
+        if ids.setdefault(smp.sample_id, smp.label.value) != smp.label.value:
+            raise ValueError(f"sample_id {smp.sample_id} appears with conflicting labels across data files")
+    # Always dedupe: predictions are keyed by sample_id, so duplicates could not be scored separately anyway.
+    seen: set[str] = set()
+    uniq = []
+    for smp in samples:
+        if smp.sample_id not in seen:
+            seen.add(smp.sample_id)
+            uniq.append(smp)
+    manifest["duplicates_dropped"] = len(samples) - len(uniq)
+    samples = uniq
 
     limit = get_by_path(cfg, "eval.limit")
     if limit:

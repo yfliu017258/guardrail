@@ -1,29 +1,37 @@
-"""Run an evaluation.
+"""Run an evaluation task.
 
-    # GPU-free smoke test (mock backend, bundled sample data)
+Tasks (``task.type``, registry ``TASKS``):
+  guardrail      is the guardrail's block decision right?              (default)
+  model_safety   does a BARE model refuse unsafe prompts / answer safe ones?   (generator + refusal judge)
+  refusal_judge  is the refusal judge itself accurate?  (human-labelled responses)
+
+    # GPU-free smoke tests
     python -m src.evaluation --config src/config/evaluation/smoke.yaml
+    python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml
 
-    # evaluate a guard model in-process against processed datasets
-    python -m src.evaluation --config src/config/evaluation/default.yaml \
-        --server-config src/config/server/qwen3guard_gen_4b.yaml \
-        --data "processed_data/*/test.csv" --run-name qwen3guard4b --max-samples 2000
+    # guardrail: a guard model in-process against processed datasets
+    python -m src.evaluation --server-config src/config/server/models/qwen3guard_gen_4b.yaml \
+        --data processed_data/mixes/core_v1.csv --run-name qwen3guard4b
 
-    # evaluate the real LiteLLM proxy guardrail
-    python -m src.evaluation --config src/config/evaluation/default.yaml --target litellm_apply_guardrail
+    # bare model: Qwen3.6-27B with a cascade refusal judge
+    python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
+
+    # validate the refusal judge first
+    python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
 
     # resume an interrupted run / recompute metrics only
-    python -m src.evaluation --resume results/20261101-120000_qwen3guard4b_ab12cd34ef56
-    python -m src.evaluation --rescore results/... --set metrics.threshold=0.3
+    python -m src.evaluation --resume results/<run_dir>
+    python -m src.evaluation --rescore results/<run_dir> --set metrics.threshold=0.3
 
-Every run writes to ``results/<timestamp>_<name>_<config_hash>/``:
-config.yaml (resolved, secrets redacted) · data_manifest.json · environment.json ·
-predictions.jsonl · metrics.json · slices.csv · errors.csv · report.md
+Every run writes ``results/<UTC>_<name>_<config_hash>/``: config.yaml (secrets redacted) · data_manifest.json ·
+environment.json · task.json · predictions.jsonl · metrics.json · slices.csv · errors.csv · report.md
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import json
 import logging
 import sys
@@ -31,12 +39,12 @@ from pathlib import Path
 
 import yaml
 
-from ..config import dump_config, get_by_path, load_config, make_run_dir, set_by_path
+from ..config import (config_hash, dump_config, get_by_path, load_config, load_envs, make_run_dir, parse_overrides,
+                      set_by_path)
 from .dataset import load_eval_set
-from .metrics import evaluate_rows
 from .report import write_report
-from .runner import load_done, run_predictions
-from .targets import build_target
+from .runner import load_latest, run_predictions
+from .tasks import EvalTask, build_task
 
 ARG_TO_KEY = {
     "run_name": "run.name",
@@ -44,6 +52,7 @@ ARG_TO_KEY = {
     "output_dir": "run.output_dir",
     "data": "data.files",
     "max_samples": "data.max_samples_per_file",
+    "task": "task.type",
     "target": "target.type",
     "server_config": "target.inprocess.server_config",
     "concurrency": "eval.concurrency",
@@ -55,7 +64,10 @@ log = logging.getLogger("evaluation")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Reproducible guardrail evaluation")
+    from .targets import TARGETS
+    from .tasks import TASKS
+
+    p = argparse.ArgumentParser(description="Reproducible guardrail / model-safety evaluation")
     p.add_argument("--config", nargs="+", default=["src/config/evaluation/default.yaml"])
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--env-file", default=".env")
@@ -65,51 +77,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--data", nargs="+", default=None, help="processed CSV paths or globs")
     p.add_argument("--max-samples", type=int, default=None, help="per file")
     p.add_argument("--limit", type=int, default=None, help="total cap after merging files")
-    p.add_argument("--target", default=None, choices=["inprocess", "guardrail_server", "litellm_apply_guardrail", "litellm_chat"])
+    p.add_argument("--task", default=None, choices=TASKS.names())
+    p.add_argument("--target", default=None, choices=TARGETS.names(), help="guardrail task only")
     p.add_argument("--server-config", nargs="+", default=None, help="server YAML(s) for the inprocess target")
     p.add_argument("--concurrency", type=int, default=None)
-    p.add_argument("--threshold", type=float, default=None, help="re-threshold the pipeline score")
+    p.add_argument("--threshold", type=float, default=None, help="re-threshold the score")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--resume", default=None, metavar="RUN_DIR", help="continue an interrupted run with its saved config")
     g.add_argument("--rescore", default=None, metavar="RUN_DIR", help="recompute metrics from predictions.jsonl only")
+    g.add_argument("--list", action="store_true", help="list registered tasks / targets / generators / judges")
+    p.add_argument("--force", action="store_true", help="--resume even if data files or the task changed")
     return p.parse_args(argv)
 
 
-def _metrics(rows: list[dict], cfg: dict) -> dict:
-    return evaluate_rows(
-        rows,
-        threshold=get_by_path(cfg, "metrics.threshold"),
-        error_policy=get_by_path(cfg, "eval.error_policy", "exclude"),
-        n_boot=int(get_by_path(cfg, "metrics.bootstrap", 1000)),
-        ci=float(get_by_path(cfg, "metrics.ci", 0.95)),
-        seed=int(get_by_path(cfg, "run.seed", 42)),
-        fpr_targets=get_by_path(cfg, "metrics.fpr_targets", [0.01, 0.05]),
-        slice_by=get_by_path(cfg, "metrics.slice_by", ["source", "language", "input_type"]),
-        min_slice_size=int(get_by_path(cfg, "metrics.min_slice_size", 1)),
-    )
-
-
-def contaminated_patterns(cfg: dict, target_desc: dict) -> list[str]:
-    """Sources the evaluated model(s) were trained on: ``metrics.contaminated_sources`` + every stage's
-    ``trained_on`` in the (in-process) server config. Glob patterns over the ``source`` column."""
-    pats = list(get_by_path(cfg, "metrics.contaminated_sources") or [])
-    for st in get_by_path(target_desc, "server_config.pipeline.stages", []) or []:
-        if st.get("enabled", True):
-            pats += st.get("trained_on") or []
-    return sorted(set(pats))
-
-
-def _with_clean(rows: list[dict], cfg: dict, target_desc: dict) -> dict:
-    import fnmatch
-
-    metrics = _metrics(rows, cfg)
-    pats = contaminated_patterns(cfg, target_desc)
+def compute_metrics(task: EvalTask, rows: list[dict]) -> dict:
+    """Task metrics + the same metrics on the contamination-free subset (if the model declares training data)."""
+    metrics = task.compute_metrics(rows)
+    pats = task.contaminated_patterns()
     if pats:
         dirty = {r["source"] for r in rows if any(fnmatch.fnmatch(str(r["source"]), p) for p in pats)}
         clean_rows = [r for r in rows if r["source"] not in dirty]
         metrics["contamination"] = {"patterns": pats, "excluded_sources": sorted(dirty), "n_clean": len(clean_rows)}
         if dirty and clean_rows:
-            m = _metrics(clean_rows, cfg)
+            m = task.compute_metrics(clean_rows)
             metrics["clean"] = {k: m[k] for k in ("n_total", "n_scored", "overall", "ci", "score_metrics") if k in m}
     return metrics
 
@@ -120,51 +110,109 @@ def _environment() -> dict:
     return {"python": sys.version, "packages": sorted(f"{d.metadata['Name']}=={d.version}" for d in md.distributions())}
 
 
-async def _run(cfg: dict, run_dir: Path) -> None:
+def _write_json(path: Path, obj) -> None:
+    from ..config import redact
+
+    path.write_text(json.dumps(redact(obj), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def _check_resume(run_dir: Path, manifest: dict, desc: dict, force: bool) -> None:
+    """A resumed run must use the data and task settings of the original one, or the run mixes two configs."""
+    problems = []
+    old_m = run_dir / "data_manifest.json"
+    if old_m.exists():
+        old = {f["path"]: f["sha256"] for f in json.loads(old_m.read_text(encoding="utf-8")).get("files", [])}
+        new = {f["path"]: f["sha256"] for f in manifest.get("files", [])}
+        if old != new:
+            problems.append(f"data files changed: {sorted(set(old.items()) ^ set(new.items()))}")
+    old_t = next((p for p in (run_dir / "task.json", run_dir / "target.json") if p.exists()), None)
+    if old_t is not None:
+        from ..config import redact
+
+        if config_hash(json.loads(old_t.read_text(encoding="utf-8"))) != config_hash(json.loads(json.dumps(redact(desc), default=str))):
+            problems.append(f"task/target settings differ from {old_t.name} (e.g. an edited server preset)")
+    if problems and not force:
+        raise SystemExit("refusing to --resume: " + "; ".join(problems) + ". Start a new run, or pass --force.")
+
+
+async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = False) -> None:
     samples, manifest = load_eval_set(cfg)
-    (run_dir / "data_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    target = build_target(cfg)
-    await target.startup()
+    task = build_task(cfg)
+    n_before = len(samples)
+    samples = task.select(samples)
+    manifest["task_selected"] = {"task": task.registry_name, "kept": len(samples), "dropped": n_before - len(samples)}
+    desc = task.describe()
+    if resume:
+        _check_resume(run_dir, manifest, desc, force)
+    _write_json(run_dir / "data_manifest.json", manifest)
+    await task.startup()
     try:
-        desc = target.describe()
-        (run_dir / "target.json").write_text(json.dumps(desc, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        rows = await run_predictions(target, samples, cfg, run_dir / "predictions.jsonl")
+        _write_json(run_dir / "task.json", desc)
+        rows = await run_predictions(task, samples, cfg, run_dir / "predictions.jsonl")
     finally:
-        await target.shutdown()
-    metrics = _with_clean(rows, cfg, desc)
+        await task.shutdown()
+    metrics = compute_metrics(task, rows)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
     o = metrics["overall"]
-    log.info("done: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", o["n"], o["precision"], o["recall"], o["f1"], o["fpr"], run_dir)
+    log.info("done [%s]: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", task.registry_name, o["n"], o["precision"],
+             o["recall"], o["f1"], o["fpr"], run_dir)
+
+
+def _list() -> None:
+    from ..refuse_judge import REFUSAL_JUDGES
+    from .generation import GENERATORS
+    from .targets import TARGETS
+    from .tasks import TASKS
+
+    for title, reg in (("tasks", TASKS), ("targets (guardrail task)", TARGETS), ("generators (model_safety)", GENERATORS),
+                       ("refusal judges", REFUSAL_JUDGES)):
+        print(f"{title}:")
+        for d in reg.describe():
+            print(f"  {d['name']:26s} {d['doc']}")
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs every URL (incl. user:pw@) at INFO
+    if args.list:
+        _list()
+        return
 
     if args.rescore or args.resume:
         run_dir = Path(args.rescore or args.resume)
         cfg = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
-        from ..config import load_envs, parse_overrides
-
         cfg["envs"] = load_envs(args.env_file, cfg.get("env_passthrough", []))  # secrets were redacted in the snapshot
+        mapped = {a: v for a, v in vars(args).items() if a in ARG_TO_KEY and v is not None}
+        if args.resume:
+            if args.overrides or mapped:  # a resumed run must keep the settings recorded in its config.yaml
+                raise SystemExit("--resume takes no --set / config flags (they would not be recorded); "
+                                 "use --rescore for metric settings or start a new run")
+            asyncio.run(_run(cfg, run_dir, resume=True, force=args.force))
+            return
+        for a, v in mapped.items():
+            set_by_path(cfg, ARG_TO_KEY[a], v)
         for k, v in parse_overrides(args.overrides):
             set_by_path(cfg, k, v)
-        if args.rescore:
-            rows = list(load_done(run_dir / "predictions.jsonl").values())
-            manifest = json.loads((run_dir / "data_manifest.json").read_text(encoding="utf-8"))
-            desc = json.loads((run_dir / "target.json").read_text(encoding="utf-8")) if (run_dir / "target.json").exists() else {}
-            sub = run_dir / f"rescore_{get_by_path(cfg, 'metrics.threshold', 'default')}"
-            sub.mkdir(exist_ok=True)
-            write_report(sub, _with_clean(rows, cfg, desc), cfg, manifest, desc, rows)
-            log.info("rescored -> %s", sub)
-            return
-        asyncio.run(_run(cfg, run_dir))
+        rows = load_latest(run_dir / "predictions.jsonl")  # transport failures stay in as errors
+        manifest = json.loads((run_dir / "data_manifest.json").read_text(encoding="utf-8"))
+        desc_path = next((p for p in (run_dir / "task.json", run_dir / "target.json") if p.exists()), None)
+        desc = json.loads(desc_path.read_text(encoding="utf-8")) if desc_path else {}
+        task = build_task(cfg)  # constructors never touch the network; only startup() does
+        settings = {k: cfg.get(k) for k in ("metrics", "eval")}
+        th = get_by_path(cfg, "metrics.threshold")
+        sub = run_dir / f"rescore_{'default' if th is None else th}_{config_hash(settings)[:8]}"
+        sub.mkdir(exist_ok=True)
+        dump_config({**cfg, "meta": {**cfg.get("meta", {}), "rescore_of": str(run_dir),
+                                     "rescore_overrides": args.overrides, "rescore_args": mapped}}, sub / "config.yaml")
+        write_report(sub, compute_metrics(task, rows), cfg, manifest, desc, rows)
+        log.info("rescored -> %s", sub)
         return
 
     cfg = load_config(args.config, vars(args), ARG_TO_KEY, args.overrides, args.env_file, run_kind="evaluation")
     run_dir = make_run_dir(cfg)
     dump_config(cfg, run_dir / "config.yaml")
-    (run_dir / "environment.json").write_text(json.dumps(_environment(), indent=2), encoding="utf-8")
+    _write_json(run_dir / "environment.json", _environment())
     asyncio.run(_run(cfg, run_dir))
 
 

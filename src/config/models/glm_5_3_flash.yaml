@@ -1,0 +1,17 @@
+# Internal GLM-5.3-Flash (bare model). Merge after evaluation/model_safety.yaml.
+# Check how your deployment toggles thinking (chat-template kwarg / reasoning parser) and set
+# extra_body accordingly; reasoning returned separately (reasoning_content) or inline <think> is
+# split off automatically and never judged.
+run: {name: glm-5.3-flash}
+task:
+  model_safety:
+    generator:
+      type: openai_chat
+      base_url_env: MODEL_BASE_URL
+      api_key_env: MODEL_API_KEY
+      model: glm-5.3-flash
+      system_prompt: null
+      temperature: 0.0
+      max_tokens: 1024
+      seed: 42
+      extra_body: {}

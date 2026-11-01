@@ -78,7 +78,7 @@ def load_spec(path: str, envs: dict[str, str]) -> tuple[str, list[dict]]:
     return managed_by, out
 
 
-def _subset_diff(desired: dict, current: dict, skip: set[str] = frozenset()) -> dict[str, tuple[Any, Any]]:
+def _subset_diff(desired: dict, current: dict, skip: set[str] = frozenset()) -> dict[str, dict[str, Any]]:
     """Keys in ``desired`` whose value differs in ``current``. The proxy stores litellm_params with every
     default filled in, so extra keys on the proxy side are not a difference."""
     diff = {}
@@ -89,9 +89,9 @@ def _subset_diff(desired: dict, current: dict, skip: set[str] = frozenset()) -> 
         if isinstance(v, dict) and isinstance(cur, dict):
             sub = _subset_diff(v, cur)
             if sub:
-                diff[k] = (v, {kk: cur.get(kk) for kk in v})
+                diff[k] = {"new": v, "old": {kk: cur.get(kk) for kk in v}}
         elif cur != v:
-            diff[k] = (v, cur)
+            diff[k] = {"new": v, "old": cur}
     return diff
 
 
@@ -143,7 +143,10 @@ def _print_plan(plan: list[dict]) -> None:
         if p["action"] == "update":
             for section, changes in p["diff"].items():
                 if isinstance(changes, dict):
-                    for k, (new, old) in changes.items():
+                    for k, ch in changes.items():
+                        if not isinstance(ch, dict):
+                            continue
+                        old, new = redact(ch["old"], k), redact(ch["new"], k)
                         print(f"        {section}.{k}: {json.dumps(old, ensure_ascii=False)} -> {json.dumps(new, ensure_ascii=False)}")
         if p["action"] == "conflict":
             print(f"        {p['reason']}")

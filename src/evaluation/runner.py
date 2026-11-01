@@ -1,4 +1,5 @@
-"""Async runner: bounded concurrency, retries, incremental + resumable predictions.jsonl."""
+"""Async runner shared by every task: bounded concurrency, retries on ``TargetError``,
+incremental + resumable predictions.jsonl. Rows = sample fields + whatever ``task.predict`` returns."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,35 +15,62 @@ from tqdm.asyncio import tqdm
 
 from ..config import get_by_path
 from ..data_schema import GuardrailSample
-from .targets import Prediction, Target, TargetError
+from .errors import TargetError
 
 log = logging.getLogger("evaluation")
 
 
-def load_done(pred_path: Path) -> dict[str, dict]:
-    """Already-finished predictions (for --resume). Rows with transport errors are re-run."""
+def read_records(pred_path: Path, repair: bool = False) -> list[dict]:
+    """All records in file order. A truncated final line (process killed mid-write) is skipped and,
+    with ``repair``, cut off so that appending continues on a clean line boundary."""
+    if not pred_path.exists():
+        return []
+    raw = pred_path.read_bytes()
+    out, good_end, pos = [], 0, 0
+    for line in raw.split(b"\n"):
+        end = pos + len(line) + 1
+        if line.strip():
+            try:
+                out.append(json.loads(line))
+                good_end = min(end, len(raw))
+            except json.JSONDecodeError:
+                if end < len(raw):  # corruption in the middle is not a crash artefact -> fail loudly
+                    raise
+                log.warning("%s: dropping truncated final record (%d bytes)", pred_path, len(line))
+                if repair:
+                    with pred_path.open("r+b") as f:
+                        f.truncate(good_end)
+        pos = end
+    return out
+
+
+def load_done(pred_path: Path, repair: bool = False) -> dict[str, dict]:
+    """Finished predictions (for --resume): latest record per sample, transport-error rows excluded."""
     done: dict[str, dict] = {}
-    if pred_path.exists():
-        with pred_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if not rec.get("_retry"):
-                    done[rec["sample_id"]] = rec
+    for rec in read_records(pred_path, repair):
+        if rec.get("_retry"):
+            done.pop(rec["sample_id"], None)
+        else:
+            done[rec["sample_id"]] = rec
     return done
 
 
-async def run_predictions(
-    target: Target, samples: list[GuardrailSample], cfg: dict[str, Any], pred_path: Path
-) -> list[dict]:
+def load_latest(pred_path: Path) -> list[dict]:
+    """Latest record per sample INCLUDING transport failures (for --rescore: they are errors, not missing)."""
+    latest: dict[str, dict] = {}
+    for rec in read_records(pred_path):
+        latest[rec["sample_id"]] = rec
+    return list(latest.values())
+
+
+async def run_predictions(task: Any, samples: list[GuardrailSample], cfg: dict[str, Any], pred_path: Path) -> list[dict]:
+    """``task`` is an ``EvalTask`` (anything with ``async predict(sample) -> dict`` and ``registry_name``)."""
     concurrency = int(get_by_path(cfg, "eval.concurrency", 16))
     retries = int(get_by_path(cfg, "eval.retries", 3))
     seed = int(get_by_path(cfg, "run.seed", 42))
     rng = random.Random(seed)
 
-    done = load_done(pred_path)
+    done = load_done(pred_path, repair=True)
     todo = [s for s in samples if s.sample_id not in done]
     if done:
         log.info("resume: %d done, %d remaining", len(done), len(todo))
@@ -53,12 +82,13 @@ async def run_predictions(
 
     async def one(s: GuardrailSample) -> dict:
         async with sem:
-            pred: Prediction | None = None
+            t_start = time.perf_counter()
+            pred: dict | None = None
             err: str | None = None
             retry_flag = False
             for attempt in range(retries + 1):
                 try:
-                    pred = await target.predict(s)
+                    pred = await task.predict(s)
                     break
                 except TargetError as e:
                     err = str(e)
@@ -70,9 +100,12 @@ async def run_predictions(
                     retry_flag = False
                     break
             if pred is None:
-                pred = Prediction(sample_id=s.sample_id, unsafe=None, error=err)
-            rec = {**_sample_fields(s), **pred.to_dict()}
-            if pred.unsafe is None and retry_flag:
+                pred = {"gold_positive": None, "pred_positive": None, "error": err,
+                        "latency_ms": (time.perf_counter() - t_start) * 1000}
+            rec = {**_sample_fields(s), **pred, "sample_id": s.sample_id}
+            if rec.get("gold_positive") is None:  # failed rows still need ground truth for error_policy fills
+                rec["gold_positive"] = task.gold(s) if hasattr(task, "gold") else s.is_unsafe
+            if pred.get("pred_positive") is None and retry_flag and pred.get("error") == err:
                 rec["_retry"] = True  # transport failure: --resume will try this row again
             async with write_lock:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -80,7 +113,7 @@ async def run_predictions(
             return rec
 
     try:
-        new = await tqdm.gather(*(one(s) for s in todo), desc=f"eval[{target.name}]", total=len(todo))
+        new = await tqdm.gather(*(one(s) for s in todo), desc=f"eval[{getattr(task, 'registry_name', 'task')}]", total=len(todo))
     finally:
         fh.close()
 
@@ -97,5 +130,6 @@ def _sample_fields(s: GuardrailSample) -> dict[str, Any]:
         "attack_type": s.attack_type,
         "gold_label": s.label.value,
         "gold_categories": [c.value for c in s.categories],
+        "gold_refusal_label": s.refusal_label,
         "text_preview": s.text[:300],
     }

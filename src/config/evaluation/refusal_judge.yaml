@@ -1,0 +1,17 @@
+# Validate a refusal judge on human-labelled responses BEFORE trusting model_safety numbers.
+#   python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
+#   ... --set task.refusal_judge.judge_config=src/config/refuse_judge/llm_judge.yaml
+_base_: default.yaml
+run:
+  name: refusal-judge
+task:
+  type: refusal_judge
+  refusal_judge:
+    judge_config: src/config/refuse_judge/cascade.yaml
+data:
+  files:
+    - processed_data/xstest_responses/test.csv      # 5 models x 450, human final_label (incl. partial)
+    - processed_data/polyguard_prompts/test.csv     # response_refusal_label (zh-CN + en)
+  input_types: [response]
+metrics:
+  slice_by: [source, language, gold_label]

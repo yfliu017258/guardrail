@@ -4,7 +4,11 @@ run:
   seed: 42
   output_dir: results
 
-env_passthrough: [GUARDRAIL_API_KEY, VLLM_API_KEY, LITELLM_API_KEY, LITELLM_BASE_URL, GUARDRAIL_SERVER_URL, HF_TOKEN]
+env_passthrough: [GUARDRAIL_API_KEY, VLLM_API_KEY, LITELLM_API_KEY, LITELLM_BASE_URL, GUARDRAIL_SERVER_URL, HF_TOKEN,
+                  MODEL_BASE_URL, MODEL_API_KEY]
+
+task:
+  type: guardrail            # guardrail | model_safety | refusal_judge   (python -m src.evaluation --list)
 
 data:
   files:                      # processed CSVs or globs (relative to repo root)
@@ -14,7 +18,7 @@ data:
   input_types: [request, response]
   languages: null             # e.g. [zh-TW, en]
   sources: null
-  dedupe: true
+  # duplicates (same sample_id) are always dropped: predictions are keyed by sample_id
 
 target:
   type: inprocess             # inprocess | guardrail_server | litellm_apply_guardrail | litellm_chat
@@ -22,6 +26,7 @@ target:
     server_config: [src/config/server/default.yaml]
     overrides: []             # dotted overrides applied to the server config
     run_all: true             # evaluate every stage (no short-circuit) -> per-stage metrics
+    response_context: none    # none = like LiteLLM post_call (no prompt sent); prompt = give the guard the user turn
   guardrail_server:
     base_url: http://localhost:8080
     base_url_env: GUARDRAIL_SERVER_URL
@@ -40,17 +45,21 @@ target:
     max_tokens: 1
     blocked_status_codes: [400]
     blocked_markers: [guardrail, blocked, violat, 攔截]
+    canary: true              # a known injection must come back BLOCKED at startup, else abort (catches fail-open)
 
 eval:
   concurrency: 16
   timeout: 60
   retries: 3
-  error_policy: exclude       # exclude | as_safe (fail-open) | as_unsafe (fail-closed)
+  error_policy: exclude       # exclude | as_safe (= fail_open) | as_unsafe (= fail_closed)
+  stage_errors: retry         # a guard stage that errored makes the row an error (retried) instead of a silent fail-open
   save_raw: true
   limit: null
 
 metrics:
-  threshold: null             # null: use the target's decision; float: re-threshold the pipeline score
+  threshold: null             # null: use the target's decision; float: re-threshold the score
+  score_stage: null           # stage whose score is re-thresholded / used for ROC (e.g. llm_guard); other
+                              # stages keep their hard decisions. null = pipeline score (max over stages)
   bootstrap: 1000
   ci: 0.95
   fpr_targets: [0.01, 0.05]

@@ -20,7 +20,8 @@ guardrails:
       default_on: false
       unreachable_fallback: fail_open
       fail_on_error: true
-      skip_system_message_in_guardrail: true
+      # do NOT set skip_system_message_in_guardrail on a shared proxy: clients write their own system
+      # messages, so a jailbreak / secret placed there would bypass the input guard entirely.
       additional_provider_specific_params: {policy: enterprise_v1}
     guardrail_info:
       description: "OJT input guard (rules -> PI classifier -> LLM guard)"
@@ -36,7 +37,7 @@ guardrails:
       default_on: false
       unreachable_fallback: fail_open
       streaming_end_of_stream_only: false
-      streaming_sampling_rate: 5
+      streaming_sampling_rate: 5               # streamed output: only BLOCKED takes effect, masking is not applied
     guardrail_info:
       description: "OJT output guard"
       owner: ai-infra

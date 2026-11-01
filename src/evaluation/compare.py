@@ -1,6 +1,6 @@
 """Leaderboard across runs.
 
-    python -m src.evaluation.compare results/*/ --sort recall_at_fpr_0.05 -o results/leaderboard.md
+    python -m src.evaluation.compare results/*/ --sort recall@fpr0.05 -o results/leaderboard.md
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ def _get(d: dict, dotted: str):
     return cur
 
 
+LOWER_IS_BETTER = {"fpr", "p50_ms", "p95_ms", "err_rate"}
+
+
 def load_run(run_dir: Path) -> dict | None:
     m = run_dir / "metrics.json"
     if not m.exists():
@@ -59,11 +62,12 @@ def load_run(run_dir: Path) -> dict | None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser()
     p.add_argument("runs", nargs="+")
-    p.add_argument("--sort", default="f1")
+    p.add_argument("--sort", default="f1", choices=[c for c, _ in COLUMNS[1:]])
     p.add_argument("-o", "--output", default=None)
     a = p.parse_args(argv)
     rows = [r for r in (load_run(Path(x)) for x in a.runs) if r]
-    rows.sort(key=lambda r: -(r.get(a.sort) or -1))
+    asc = a.sort in LOWER_IS_BETTER  # best first either way; runs without the metric go last
+    rows.sort(key=lambda r: (r.get(a.sort) is None, (r.get(a.sort) or 0) if asc else -(r.get(a.sort) or 0)))
     hdr = [c for c, _ in COLUMNS]
     lines = ["| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
     for r in rows:

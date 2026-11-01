@@ -21,7 +21,8 @@ guardrails:
       default_on: true
       unreachable_fallback: fail_open                  # guard down -> traffic flows (CRITICAL log). fail_closed for strict routes
       fail_on_error: true
-      skip_system_message_in_guardrail: true           # system prompts are ours; check user/assistant turns only
+      # do NOT set skip_system_message_in_guardrail on a shared proxy: clients write their own system
+      # messages, so a jailbreak / secret placed there would bypass the input guard entirely.
       additional_provider_specific_params:
         policy: enterprise_v1
 
@@ -35,6 +36,7 @@ guardrails:
       default_on: true
       unreachable_fallback: fail_open
       streaming_end_of_stream_only: false              # check every Nth chunk while streaming
+      # NOTE: on streamed output only BLOCKED takes effect; GUARDRAIL_INTERVENED (masking) is not applied
       streaming_sampling_rate: 5
 
   # shadow / A-B: a second service instance with a candidate model, opt-in per request

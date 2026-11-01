@@ -1,0 +1,10 @@
+# GPU-free: mock generator + keyword judge on the bundled sample data.
+_base_: smoke.yaml
+run: {name: smoke-model-safety}
+task:
+  type: model_safety
+  model_safety:
+    generator: {type: mock}
+    judge: {type: keyword}
+data:
+  input_types: [request]

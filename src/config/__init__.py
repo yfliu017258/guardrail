@@ -4,6 +4,8 @@ from .config import (
     deep_merge,
     dump_config,
     env,
+    env_summary,
+    is_secret_key,
     get,
     get_by_path,
     load_config,
@@ -11,6 +13,7 @@ from .config import (
     make_run_dir,
     parse_overrides,
     redact,
+    scrub_url,
     set_by_path,
 )
 
@@ -20,6 +23,8 @@ __all__ = [
     "deep_merge",
     "dump_config",
     "env",
+    "env_summary",
+    "is_secret_key",
     "get",
     "get_by_path",
     "load_config",
@@ -27,5 +32,6 @@ __all__ = [
     "make_run_dir",
     "parse_overrides",
     "redact",
+    "scrub_url",
     "set_by_path",
 ]

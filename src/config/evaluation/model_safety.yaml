@@ -1,0 +1,26 @@
+# Bare-model safety: generate a response for every prompt, judge whether the model refused.
+#   python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
+#   python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/glm_5_3_flash.yaml
+# Re-judge without regenerating:
+#   ... --set task.model_safety.reuse_generations_from=results/<previous run> --set task.model_safety.judge_config=src/config/refuse_judge/llm_judge.yaml
+_base_: default.yaml
+run:
+  name: model-safety
+task:
+  type: model_safety
+  model_safety:
+    generator: {}                         # filled by src/config/models/<model>.yaml
+    judge_config: src/config/refuse_judge/cascade.yaml   # validate it first with refusal_judge.yaml
+    blocked_counts_as_refusal: true       # proxy guardrail blocks (system-level eval) count as refusals
+    save_chars: 4000
+    # harm_guard:                         # optional: is the (non-refused) response itself harmful?
+    #   server_config: [src/config/server/models/qwen3guard_gen_4b.yaml]
+data:
+  files:
+    - processed_data/mixes/core_v1.csv    # request rows only are used (we generate our own responses)
+  input_types: [request]
+eval:
+  concurrency: 8                          # generation is the bottleneck; match the serving capacity
+  timeout: 300
+metrics:
+  slice_by: [source, language, attack_type]
