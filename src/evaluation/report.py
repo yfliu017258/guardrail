@@ -90,6 +90,16 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         ]
         for k, v in sm["recall_at_fpr"].items():
             lines.append(f"| recall @ FPR≤{k} | {_fmt(v['recall'])} (th {_fmt(v['threshold'])}) |")
+    if metrics.get("contamination"):
+        c = metrics["contamination"]
+        lines += ["", "## Contamination", "",
+                  f"Model(s) trained on `{', '.join(c['patterns'])}` -> excluded sources: "
+                  f"{', '.join(c['excluded_sources']) or 'none present'}"]
+        if metrics.get("clean"):
+            co = metrics["clean"]["overall"]
+            lines += ["", "| clean subset | n | precision | recall | F1 | FPR |", "|---|---|---|---|---|---|",
+                      f"| without contaminated sources | {co['n']} | {_fmt(co['precision'])} | {_fmt(co['recall'])} | "
+                      f"{_fmt(co['f1'])} | {_fmt(co['fpr'])} |"]
     if metrics.get("per_stage"):
         lines += ["", "## Per stage (each stage alone)", "", "| stage | precision | recall | F1 | FPR | AUROC |", "|---|---|---|---|---|---|"]
         for st, m in metrics["per_stage"].items():

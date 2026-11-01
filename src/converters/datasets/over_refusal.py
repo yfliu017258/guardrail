@@ -70,3 +70,49 @@ class MultiJail(BaseConverter):
                                        language="auto" if (self.options.get("opencc") or lang != "zh") else "zh-CN",
                                        meta={"id": r.get("id"), "tags": r.get("tags"), "col": lang}))
         return out or None
+
+
+@register("rtp_lx")
+class RTPLX(BaseConverter):
+    """ToxicityPrompts/RTP-LX — human-annotated, ODC-BY, with a NATIVE Traditional Chinese file (ZH_Hant).
+    Annotations are 1-5 means of 3 annotators per dimension; a row is unsafe when any dimension >= threshold.
+    RealToxicityPrompts-style continuations (not chat requests) and skewed toxic -> report as its own slice.
+    Options: ``locales: [ZH_Hant, ZH_Hans, EN]``, ``threshold: 3.0``, ``include_completions: true``.
+    Check the ZH_Hant rows are Taiwan (not HK) usage before relying on them."""
+
+    hf_id = "ToxicityPrompts/RTP-LX"
+    license = "odc-by"
+    output_split = "test"
+    DIM_MAP = {"bias": "hate_harassment", "identityattack": "hate_harassment", "microaggression": "hate_harassment",
+               "insult": "hate_harassment", "selfharm": "self_harm", "sexualcontent": "sexual",
+               "violence": "violence", "toxicity": "hate_harassment"}
+    LANG = {"ZH_Hant": "zh-TW", "ZH_Hans": "zh-CN", "EN": "en"}
+
+    def load_raw(self, split):
+        from datasets import load_dataset
+
+        for loc in self.options.get("locales", ["ZH_Hant"]):
+            for r in load_dataset(self.hf_id, data_files={"test": f"data/{loc}-00000-of-00001.parquet"},
+                                  split="test", revision=self.revision):
+                yield {**r, "_locale": loc}
+
+    def _label(self, ann: dict | None) -> tuple[str, list[str], float]:
+        thr = float(self.options.get("threshold", 3.0))
+        ann = {str(k).lower(): v for k, v in (ann or {}).items() if isinstance(v, (int, float))}
+        hits = sorted({self.DIM_MAP.get(k, "other") for k, v in ann.items() if v >= thr})
+        return ("unsafe" if hits else "safe"), hits, max(ann.values(), default=0.0)
+
+    def convert(self, r, split, idx):
+        lang = self.LANG.get(r["_locale"], "auto")
+        out = []
+        prompt = (r.get("Prompt") or "").strip()
+        label, cats, score = self._label(r.get("PromptAnnotations"))
+        if prompt:
+            out.append(self.sample(split="test", prompt=prompt, label=label, categories=cats, language=lang,
+                                   meta={"locale": r["_locale"], "max_score": score, "index": r.get("Index")}))
+        comp = (r.get("Completion") or "").strip()
+        if comp and prompt and self.options.get("include_completions", True):
+            label, cats, score = self._label(r.get("CompletionAnnotations"))
+            out.append(self.sample(split="test", input_type="response", prompt=prompt, response=comp, label=label,
+                                   categories=cats, language=lang, meta={"locale": r["_locale"], "max_score": score}))
+        return out or None

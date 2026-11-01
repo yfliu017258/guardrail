@@ -4,6 +4,7 @@
 
 - **`src/server`**：FastAPI + uvicorn 的 guardrail 服務，實作 LiteLLM 內建 `generic_guardrail_api` 的協定；多 stage pipeline，依序為 regex 規則、輕量 classifier、vLLM 上的 LLM guard。
 - **`src/evaluation`**：自動、可重現的評測 CLI。可評測 in-process pipeline、guardrail 服務，或真正的 LiteLLM proxy。輸出 metrics（含 CI、ROC、recall@FPR）、切片、錯誤樣本，以及 config snapshot。
+- **`src/litellm_admin`**：沒有 proxy config file 權限時，透過 LiteLLM admin API 以宣告式方式管理 guardrail（plan / apply / attach / test），每次變更都留 audit。
 - **`src/converters`**：把公開或內部資料集轉成統一 CSV（`processed_data/`），附 manifest，並能凍結版本化的 eval mix。
 
 計劃、調查與設計：[`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)
@@ -21,10 +22,12 @@ src/
   converters/            # base.py（registry/manifest）, datasets/*.py, mix.py, __main__.py
   server/                # app.py, pipeline.py, schemas.py, backends/{regex,hf_classifier,openai_guard,mock,parsers}.py
   evaluation/            # dataset.py, targets.py, runner.py, metrics.py, report.py, compare.py
-deploy/litellm/proxy_config.yaml   # generic_guardrail_api 設定（pre/post/candidate）
+  litellm_admin/         # client.py（admin API）, __main__.py（list/plan/apply/delete/attach/test/export）
+deploy/litellm/guardrails.yaml     # 期望的 guardrails（admin API 用，進 git 版控）
+deploy/litellm/proxy_config.yaml   # config-file 寫法參考（本專案不需要改）
 deploy/vllm/serve_guard.sh         # 在 MIG slice 上啟動 vLLM
 processed_data/samples/smoke.csv   # 30 筆中英小樣本（測試/CI）
-tests/                             # 63 個測試，不需 GPU / 網路
+tests/                             # 70 個測試，不需 GPU / 網路
 ```
 
 ## 快速開始
@@ -54,9 +57,11 @@ python -m src.evaluation --server-config src/config/server/models/qwen3guard_gen
 # 5) 比較
 python -m src.evaluation.compare results/*/ --sort f1 -o results/leaderboard.md
 
-# 6) 服務 + LiteLLM
+# 6) 服務 + 透過 admin API 註冊到 LiteLLM（不需改 proxy config）
 python -m src.server --config src/config/server/pipelines/two_stage.yaml
-litellm --config deploy/litellm/proxy_config.yaml
+python -m src.litellm_admin plan && python -m src.litellm_admin apply --yes
+python -m src.litellm_admin test ojt-guard-pre
+python -m src.litellm_admin attach --team <pilot_team_id> --guardrails ojt-guard-pre ojt-guard-post --yes
 python -m src.evaluation --target litellm_apply_guardrail --data processed_data/mixes/core_v1.csv
 ```
 

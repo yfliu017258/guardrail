@@ -17,12 +17,28 @@
 | Streaming | 預設每 `streaming_sampling_rate`（5）個 chunk 檢查一次；`streaming_end_of_stream_only: true` 只在結尾檢查 |
 | 測試端點 | `POST /guardrails/apply_guardrail {guardrail_name, text, input_type}` → 不呼叫 LLM 直接跑 guardrail（evaluation 的 `litellm_apply_guardrail` target） |
 
+## 1.1 Admin API（不改 config file 時的管理方式）
+
+| Endpoint（PROXY_ADMIN） | 用途 | 備註 |
+|---|---|---|
+| `GET /v2/guardrails/list` | DB + 記憶體中的 guardrails | `api_key` 會遮罩 → 無法 diff，`--force` 可強制重送 |
+| `POST /guardrails` `{"guardrail": {...}}` | 建立 | 立即在該 pod 初始化；設定錯誤會 rollback 回 400 |
+| `PUT /guardrails/{id}` | 整筆取代 | `src.litellm_admin apply` 使用 |
+| `PATCH /guardrails/{id}` | 合併 litellm_params | |
+| `DELETE /guardrails/{id}` | 刪除 | 其他 pod 在下次 DB 同步時移除 |
+| `POST /team/update` / `POST /key/update` `{"guardrails": [...]}` | 掛到 team / key | **整個取代**清單 |
+| `POST /guardrails/apply_guardrail` | 不呼叫 LLM 直接測 | evaluation target 與 `litellm_admin test` 使用 |
+
+- `litellm_params.api_key` / `api_base` 若為 `os.environ/NAME`，在 proxy 端初始化時以 `get_secret` 解析（`guardrail_registry.py`）。
+- 存 DB 時，litellm_params 會以 `model_dump()`（含所有預設值）序列化成 JSON；所以 diff 只比對 spec 中**有寫的 key**。
+- 其他 pod 透過 `_init_non_llm_objects_in_db`（DB polling，受 `general_settings.supported_db_objects` 控制）同步。
+
 ## 2. 為什麼選 `generic_guardrail_api` + 獨立服務
 
 | 選項 | 優點 | 缺點 |
 |---|---|---|
-| **generic_guardrail_api → 自建 FastAPI 服務**（採用） | proxy 只改 config；guard 服務獨立部署/擴充/換模型；可在 proxy 外單獨評測；多個 guardrail 名稱可做 A/B / shadow | 多一跳 HTTP（同機房 ~1ms） |
-| proxy 內 custom guardrail（`guardrail: module.Class`） | 可拿到完整 request（含 post_call 的 prompt） | 程式跑在 proxy 進程內，升級 LiteLLM 容易壞；模型推論不該在 proxy 裡 |
+| **generic_guardrail_api → 自建 FastAPI 服務**（採用） | proxy 只需透過 admin API 註冊，不必改 config、不必部署程式碼到 proxy；guard 服務獨立部署/擴充/換模型；可在 proxy 外單獨評測；多個 guardrail 名稱可做 A/B / shadow | 多一跳 HTTP（同機房 ~1ms） |
+| proxy 內 custom guardrail（`guardrail: module.Class`） | 可拿到完整 request（含 post_call 的 prompt） | 需要把 Python 檔放進 proxy image / config（**沒有 config 權限時不可行**）；跑在 proxy 進程內，升級 LiteLLM 容易壞 |
 | SaaS（Lakera、Azure…） | 免維運 | 資料外送、延遲、無法客製 zh-TW / 公司 policy、成本 |
 
 ## 3. Guardrail 服務內部

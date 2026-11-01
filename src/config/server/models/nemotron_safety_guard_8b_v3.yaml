@@ -6,6 +6,7 @@ pipeline:
   stages:
     - name: llm_guard
       type: openai_guard
+      trained_on: [aegis2, "nemotron_safety_v3*"]   # contamination: excluded from the "clean" metrics
       base_url: http://localhost:8000/v1
       api_key_env: VLLM_API_KEY
       model: nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3

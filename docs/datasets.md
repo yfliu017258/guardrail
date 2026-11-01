@@ -18,20 +18,35 @@
 | Jailbreak（in-the-wild） | `TrustAIRLab/in-the-wild-jailbreak-prompts` | `in_the_wild_jailbreak` | MIT | regular_* 可當 role-play hard negative；需去重 |
 | Over-refusal | `Paul/XSTest`（450）、`bench-llm/or-bench` hard-1k / toxic | `xstest`、`or_bench` | CC-BY-4.0 | 英文 |
 | Harm recall（unsafe-only） | `JailbreakBench/JBB-Behaviors`、`swiss-ai/harmbench`、`DAMO-NLP-SG/MultiJail` | `jbb_behaviors`、`harmbench`、`multijail` | MIT | 只能算 recall；MultiJail 有人工翻譯 zh |
+| **原生 zh-TW 內容安全** | `ToxicityPrompts/RTP-LX` `data/ZH_Hant-*.parquet`（約 1K 筆/語系，另有 ZH_Hans、EN） | `rtp_lx` | ODC-BY | 人工標註 1–5 分；毒性續寫（RealToxicityPrompts 系），不是對話請求、偏 toxic；先確認是台灣用語而非香港 |
+| 原生 zh-TW（台灣特有風險） | `mtkresearch/TS-Bench`（GitHub，400 筆：詐騙、金融、醫療錯誤資訊、歧視、政治操弄） | `local_file` | 未確認 | Breeze-Guard 作者所建，對 Breeze-Guard 有利 |
 | PII（zh-TW） | `lianghsun/tw-PII-bench`（910） | `tw_pii_bench` | Apache-2.0 | 唯一查證過的 zh-TW PII（身分證/健保卡/統編…）；LLM 生成，僅 5–10% 人工檢查 |
 | PII + secrets | `cjhwong/seatbelt-pii-tagger-data` heldout | `seatbelt_pii_heldout` | Apache-2.0 | zh-Hant / zh-Hans / en + regex 產生的 secrets |
 | 內部資料 | 紅隊、SaaS 方案已標註的 log | `local_file` | internal | **不要 commit 原始檔** |
 
 ## 2. 重要發現
 
-1. **沒有公開的 zh-TW guardrail / over-refusal 資料集**：查過 zh-TW、zh-Hant、taiwan、twinkle-ai、MediaTek-Research、lianghsun 等關鍵字。
-   → 作法：`opencc: s2twp` 轉換（converter 內建選項，會標 `meta.converted`）+ 人工審 + 內部手寫 golden set。
+1. **原生 zh-TW 資料很少**（critic 二次查證後修正）：只有 RTP-LX `ZH_Hant`（毒性續寫）、TS-Bench（GitHub，400 筆台灣特有風險）、tw-PII-bench（PII）。沒有 zh-TW 的 prompt-injection / over-refusal 資料集。
+   → 作法：以上述三者為錨點；`opencc: s2twp` 轉換（converter 內建選項，會標 `meta.converted`）+ 人工審；內部手寫公司情境 golden set。
 2. **PRC 政治規範會污染標註**：`SUSTech/ChineseSafe` 的「政治错误」把六四、法輪功相關、批評中共標成違規；TC260 系列依中國標準。
    → `chinesesafe` converter 預設丟棄該 subject；不要用 TC260 系列。
 3. **資料品質陷阱**：PolyGuardPrompts 的 zh 列有翻譯器拒答被標 harmful、`<SOURCE_TEXT>` 標記外洩；ChineseSafe 有明顯錯標；deepset/prompt-injections 標註可疑且被大量模型訓練過（只當 sanity check）。
 4. **兩條標註軸要分開**：「是否是攻擊（injection/jailbreak）」vs「內容是否有害」。很多 PI 資料集把「單純有害但沒有 override 企圖」的請求標成 benign。
    → schema 中 `attack_type` 與 `categories` 分開；報告分 slice 看。
 5. **PII 是「偵測」不是「阻擋」**：PII 出現在 prompt 中該擋、遮罩還是放行是 policy 決定；PII 資料集主要用來驗證 `regex` / mask stage。
+
+6. **資料污染（contamination）**：模型在「自己的訓練資料家族」上分數會虛高，比較時要排除：
+
+   | 模型 | 訓練資料（與 eval 重疊） |
+   |---|---|
+   | Nemotron-3.5-Content-Safety、Llama-3.1-Nemotron-Safety-Guard-8B-v3 | Aegis 2.0、Nemotron-Safety-Guard-Dataset-v3（v3 的 zh test = Aegis test 的翻譯，id 相同） |
+   | Horizon content-safety-guard | Nemotron v3、Salad-Data、JBB-Behaviors |
+   | Horizon prompt-injection-guard | neuralchemy、S-Labs、llmail-inject、TrustAIRLab、agentic-5k |
+   | PolyGuard | PolyGuardMix（≈ PolyGuardPrompts 同源） |
+   | YuFeng-XGuard | WildGuardMix |
+   | Breeze-Guard-26 | TS-Bench（同作者） |
+
+   server preset 的 stage 可寫 `trained_on: [aegis2, "nemotron_safety_v3*"]`，或在 eval config 寫 `metrics.contaminated_sources`；report 會另外列出排除這些 source 後的 **clean** 指標。
 
 ## 3. 統一格式（`src/data_schema/schema.py`）
 

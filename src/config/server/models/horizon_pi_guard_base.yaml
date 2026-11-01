@@ -6,6 +6,7 @@ pipeline:
   stages:
     - name: injection_clf
       type: hf_classifier
+      trained_on: [neuralchemy_pi, in_the_wild_jailbreak]   # contamination (card: also llmail/S-Labs/agentic-5k -> treat those pi_eval_suite configs as near-distribution)
       model: Horizon-Labs/prompt-injection-guard-base
       unsafe_labels: [INJECTION]
       max_length: 2048

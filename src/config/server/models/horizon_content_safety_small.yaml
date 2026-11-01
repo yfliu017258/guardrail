@@ -6,6 +6,7 @@ pipeline:
   stages:
     - name: content_clf
       type: hf_classifier
+      trained_on: ["nemotron_safety_v3*", jbb_behaviors]   # contamination: excluded from the "clean" metrics
       model: Horizon-Labs/content-safety-guard-small
       activation: sigmoid
       unsafe_labels: [unsafe]

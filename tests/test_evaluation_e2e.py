@@ -25,3 +25,12 @@ def test_reproducible_sampling(tmp_path):
     ids = [[json.loads(l)["sample_id"] for l in next((tmp_path / d).iterdir()).joinpath("predictions.jsonl").open()]
            for d in ("a", "b")]
     assert sorted(ids[0]) == sorted(ids[1]) and len(ids[0]) == 10
+
+
+def test_contamination_clean_metrics(tmp_path):
+    main(["--config", "src/config/evaluation/smoke.yaml", "--output-dir", str(tmp_path), "--env-file", "/nonexistent",
+          "--set", "metrics.contaminated_sources=[smok*]"])
+    (run_dir,) = list(tmp_path.iterdir())
+    m = json.loads((run_dir / "metrics.json").read_text())
+    assert m["contamination"]["excluded_sources"] == ["smoke"] and m["contamination"]["n_clean"] == 0
+    assert "## Contamination" in (run_dir / "report.md").read_text()

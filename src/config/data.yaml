@@ -30,6 +30,9 @@ datasets:
   xstest: {}
   or_bench: {}
   multijail_zhtw: {converter: multijail, languages: [zh], opencc: s2twp}
+  rtp_lx: {locales: [ZH_Hant, ZH_Hans, EN], threshold: 3.0}  # ODC-BY; NATIVE zh-TW (ZH_Hant)
+  # TS-Bench (400 human-curated Taiwanese-Mandarin prompts, GitHub mtkresearch/TS-Bench, licence unverified):
+  # download, check licence, then load with converter: local_file
 
   # ---------------- PII / secrets (detection, for the rules/mask stage) ----------------
   tw_pii_bench: {ignore_labels: [private_date]}
@@ -64,6 +67,7 @@ mixes:
   zhtw_v1:                                                   # zh-TW focused; replace machine-converted parts with human-reviewed data ASAP
     seed: 42
     parts:
+      - {file: processed_data/rtp_lx/test.csv, filter: {language: [zh-TW]}}   # native Traditional Chinese
       - {file: processed_data/nemotron_safety_v3_zhtw/test.csv, n: 1500}
       - {file: processed_data/multijail_zhtw/test.csv}
       - {file: processed_data/tw_pii_bench/test.csv}

@@ -1,0 +1,28 @@
+# MediaTek-Research/Breeze-Guard-26 — the only zh-TW-native guard (8B, Taiwanese Mandarin). PROMPT-ONLY and
+# covers just 6 Taiwan-specific risks (scam, fin_malpractice, health_misinfo, gender_bias, group_hate,
+# pol_manipulation) — use as a specialist next to a general guard, not alone. No violence/self-harm/jailbreak.
+# Output: [<think>...</think>]<score>yes|no</score> (yes = unsafe). Card says it over-flags benign
+# government / job texts. Licence: tagged apache-2.0 but base is Llama-Breeze2 (llama3.2) -> legal review.
+# The model expects an assistant header "judge{no_think}" from its own chat_template.jinja: serve with
+#   vllm serve MediaTek-Research/Breeze-Guard-26 --chat-template <repo>/chat_template.jinja
+# and VERIFY the rendered prompt once (vLLM /tokenize or a manual request) before trusting numbers.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: breeze-guard-26}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      trained_on: [ts_bench]   # contamination: excluded from the "clean" metrics
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: MediaTek-Research/Breeze-Guard-26
+      parser: granite_guardian            # same <score>yes|no</score> format
+      parser_options: {criteria_id: tw_risk, criteria_category: crime}
+      prompt_mode: chat_template
+      max_tokens: 16
+      logprobs: true
+      top_logprobs: 5
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request]
+      on_error: fail_open

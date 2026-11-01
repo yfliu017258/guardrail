@@ -15,6 +15,7 @@
 | openai/gpt-oss-safeguard-20b | 21B MoE (3.6B active) MXFP4 / ~14GB | 未說明 | ✅ 完整 policy | 依 policy（JSON）→ `json_policy` | 離線標註、policy 原型、第二層；**推理 token 慢** | `gpt_oss_safeguard_20b.yaml` |
 | meta-llama/Llama-Guard-3-8B | 8B / ~16GB | ❌ | 部分 | `safe` / `unsafe\nS1,S2` → `llama_guard` | 英文業界參考值（gated） | `llama_guard_3_8b.yaml` |
 | ibm-granite/granite-guardian-4.1-8b | 8.4B / ~16.8GB | ❌ en only | ✅ criteria | `<score>yes</score>` → `granite_guardian` | 英文 / RAG groundedness 軌 | `granite_guardian_4_1_8b.yaml` |
+| MediaTek-Research/Breeze-Guard-26 | 8B / ~16.1GB | ✅ **zh-TW 原生** | ❌（6 類台灣特有風險） | `<score>yes|no</score>` → `granite_guardian` | zh-TW 專門比較對象；**只判斷 prompt**；不含暴力/自傷/jailbreak；會誤擋政府/求職文字；base 為 Llama 3.2 授權 | `breeze_guard_26.yaml` |
 | openguardrails/OpenGuardrails-Text-2510 | 14.8B GPTQ int4 / ~10GB | ✅ | 平台開關 | `unsafe\nS#` → `llama_guard` + `category_map` | ⚠️ S2/S3 為 PRC 政治類別；需合規審查 | （可自行加） |
 | ServiceNow-AI/AprielGuard | 7.9B / ~15.8GB | 未說明 | ❌ | `unsafe-O14\nadversarial` → `aprielguard` | 同時給 harm + adversarial | （可自行加） |
 | 略過 | Llama-Guard-3-1B、Llama-Guard-4-12B（無中文、VRAM 緊）、ShieldGemma、WildGuard、Granite 3.3、DynaGuard | | | | | |
@@ -30,14 +31,18 @@
 | meta-llama/Llama-Prompt-Guard-2-86M | 279M | ❌ 未評測 | **config 無 id2label** → 用 index 1 | 只當 baseline | `prompt_guard_2_86m.yaml` |
 | 略過 | protectai v2（archived、英文）、Prompt-Guard-2-22M（英文詞表）、deepset、PIGuard、NemoGuard-JailbreakDetect、sheltron（NC） | | | | |
 
+> **Qwen3Guard 的 `Controversial` 怎麼對應影響很大**：第三方報告 Qwen3Guard-Gen-0.6B 在 strict（Controversial 算 unsafe）時，OpenAI-moderation safe 文字誤擋 43.7%，loose 時只有 12.5%。兩種都要跑：
+> `--set target.inprocess.overrides='[pipeline.stages.0.parser_options.controversial_as_unsafe=false]'`
+
 ## 3. 建議實驗順序
 
 1. **Baseline**：`llm_judge_baseline.yaml`（重現現有 SaaS/prompt 方式）→ 取得要超越的數字。
 2. **單模型掃描**：Qwen3Guard-Gen-0.6B / 4B / 8B、Nemotron-3.5、Nemotron-8B-v3、Llama-Guard-3-8B（英文參考）。
 3. **Classifier**：Horizon PI guard、content-safety-guard-small、Prompt-Guard-2（baseline）。
 4. **組合**：`pipelines/two_stage.yaml`；用 eval 的 `per_stage` 與 ROC 選 threshold。
-5. **自訂 policy**：Nemotron-3.5 + `policies/enterprise_policy.md`，對比內建 taxonomy，看公司特有類別（confidential）是否改善。
-6. Phase 2：streaming（Qwen3Guard-Stream，非 vLLM，需自寫服務）、indirect injection（RAG / tool 輸出）。
+5. **zh-TW 專門**：Breeze-Guard-26 與通用 guard 並列，看 RTP-LX ZH_Hant / TS-Bench / 內部集的切片。
+6. **自訂 policy**：Nemotron-3.5 + `policies/enterprise_policy.md`，對比內建 taxonomy，看公司特有類別（confidential）是否改善。
+7. Phase 2：streaming（Qwen3Guard-Stream，非 vLLM，需自寫服務）、indirect injection（RAG / tool 輸出）。
 
 ## 4. 部署筆記
 

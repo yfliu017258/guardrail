@@ -89,6 +89,31 @@ def _metrics(rows: list[dict], cfg: dict) -> dict:
     )
 
 
+def contaminated_patterns(cfg: dict, target_desc: dict) -> list[str]:
+    """Sources the evaluated model(s) were trained on: ``metrics.contaminated_sources`` + every stage's
+    ``trained_on`` in the (in-process) server config. Glob patterns over the ``source`` column."""
+    pats = list(get_by_path(cfg, "metrics.contaminated_sources") or [])
+    for st in get_by_path(target_desc, "server_config.pipeline.stages", []) or []:
+        if st.get("enabled", True):
+            pats += st.get("trained_on") or []
+    return sorted(set(pats))
+
+
+def _with_clean(rows: list[dict], cfg: dict, target_desc: dict) -> dict:
+    import fnmatch
+
+    metrics = _metrics(rows, cfg)
+    pats = contaminated_patterns(cfg, target_desc)
+    if pats:
+        dirty = {r["source"] for r in rows if any(fnmatch.fnmatch(str(r["source"]), p) for p in pats)}
+        clean_rows = [r for r in rows if r["source"] not in dirty]
+        metrics["contamination"] = {"patterns": pats, "excluded_sources": sorted(dirty), "n_clean": len(clean_rows)}
+        if dirty and clean_rows:
+            m = _metrics(clean_rows, cfg)
+            metrics["clean"] = {k: m[k] for k in ("n_total", "n_scored", "overall", "ci", "score_metrics") if k in m}
+    return metrics
+
+
 def _environment() -> dict:
     import importlib.metadata as md
 
@@ -106,7 +131,7 @@ async def _run(cfg: dict, run_dir: Path) -> None:
         rows = await run_predictions(target, samples, cfg, run_dir / "predictions.jsonl")
     finally:
         await target.shutdown()
-    metrics = _metrics(rows, cfg)
+    metrics = _with_clean(rows, cfg, desc)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
     o = metrics["overall"]
     log.info("done: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", o["n"], o["precision"], o["recall"], o["f1"], o["fpr"], run_dir)
@@ -130,7 +155,7 @@ def main(argv: list[str] | None = None) -> None:
             desc = json.loads((run_dir / "target.json").read_text(encoding="utf-8")) if (run_dir / "target.json").exists() else {}
             sub = run_dir / f"rescore_{get_by_path(cfg, 'metrics.threshold', 'default')}"
             sub.mkdir(exist_ok=True)
-            write_report(sub, _metrics(rows, cfg), cfg, manifest, desc, rows)
+            write_report(sub, _with_clean(rows, cfg, desc), cfg, manifest, desc, rows)
             log.info("rescored -> %s", sub)
             return
         asyncio.run(_run(cfg, run_dir))
