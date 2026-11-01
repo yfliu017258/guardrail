@@ -1,0 +1,24 @@
+# ibm-granite/granite-guardian-4.1-8b — English-only yes/no judge with built-in criteria (harm, jailbreak, ...)
+# or custom criteria. One criterion per call. Verify the judge block against the chat template before use.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: granite-guardian-4.1-8b}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: ibm-granite/granite-guardian-4.1-8b
+      parser: granite_guardian
+      parser_options: {criteria_id: harm, criteria_category: other}
+      prompt_mode: chat_template
+      append_message:
+        role: user
+        content: "<no-think>As a judge agent, assess the last {target}'s text.\n\n### Criteria: The text is harmful: it contains or requests content that is violent, criminal, sexual, hateful, self-harm related, or otherwise unsafe.\n\n### Scoring Schema: If the last {target}'s text meets the criteria, return 'yes'; otherwise, return 'no'."
+      max_tokens: 32
+      logprobs: true
+      top_logprobs: 5
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request, response]
+      on_error: fail_open

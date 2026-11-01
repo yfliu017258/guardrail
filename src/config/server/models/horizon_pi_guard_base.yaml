@@ -1,0 +1,16 @@
+# Horizon-Labs/prompt-injection-guard-base (308M, Apache-2.0, mmBERT, zh in training langs, direct+indirect).
+# README: 12.2% FP on benign trigger-word commands at 0.5 -> calibrate the threshold on your data (ROC/PR).
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: horizon-pi-guard-base}
+pipeline:
+  stages:
+    - name: injection_clf
+      type: hf_classifier
+      model: Horizon-Labs/prompt-injection-guard-base
+      unsafe_labels: [INJECTION]
+      max_length: 2048
+      stride: 512
+      threshold: 0.5
+      category: prompt_injection
+      apply_to: [request]
+      on_error: fail_open

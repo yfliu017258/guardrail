@@ -1,0 +1,27 @@
+# nvidia/Nemotron-3.5-Content-Safety (2026-06) — Gemma-3-4B base, lists zh, Aegis 2.0 taxonomy OR a CUSTOM POLICY
+# passed via chat_template_kwargs. Best fit for company-specific rules on a small slice.
+# serve (card pins vllm>=0.11,<=0.20.2): MODEL=nvidia/Nemotron-3.5-Content-Safety MAX_LEN=8192 deploy/vllm/serve_guard.sh
+# license: OpenMDW-1.1 + Gemma terms -> legal review. zh = Simplified or Traditional not stated -> validate on zh-TW.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: nemotron35-content-safety}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: nvidia/Nemotron-3.5-Content-Safety
+      parser: nemotron35
+      prompt_mode: chat_template
+      content_as_parts: true          # card example sends content as [{type: text, text: ...}]
+      extra_body:
+        chat_template_kwargs: {request_categories: /categories, enable_thinking: false}
+      # uncomment to judge against our own policy instead of the built-in taxonomy:
+      # policy_file: src/config/server/policies/enterprise_policy.md
+      # policy_as_template_kwarg: custom_policy
+      max_tokens: 48
+      logprobs: true
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request, response]
+      on_error: fail_open

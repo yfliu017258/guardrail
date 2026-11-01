@@ -1,0 +1,20 @@
+# meta-llama/Llama-Guard-3-8B — MLCommons S1-S14 baseline. Gated (Meta form). NO Chinese in its language list:
+# keep it as the English reference point. Score = P(first token == "unsafe") (card recommendation).
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: llama-guard-3-8b}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: meta-llama/Llama-Guard-3-8B
+      parser: llama_guard
+      prompt_mode: chat_template
+      max_tokens: 16
+      logprobs: true
+      top_logprobs: 5
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request, response]
+      on_error: fail_open

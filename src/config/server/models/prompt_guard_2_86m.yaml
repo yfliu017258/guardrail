@@ -1,0 +1,16 @@
+# meta-llama/Llama-Prompt-Guard-2-86M — gated (Llama 4 license). config.json has NO id2label -> map by index (1 = malicious).
+# zh not evaluated by Meta; keep as baseline.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: prompt-guard-2-86m}
+pipeline:
+  stages:
+    - name: injection_clf
+      type: hf_classifier
+      model: meta-llama/Llama-Prompt-Guard-2-86M
+      unsafe_label_ids: [1]
+      max_length: 512
+      stride: 64
+      threshold: 0.5
+      category: jailbreak
+      apply_to: [request]
+      on_error: fail_open

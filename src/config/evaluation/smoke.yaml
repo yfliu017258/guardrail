@@ -1,0 +1,12 @@
+# GPU-free end-to-end check: mock backend + bundled sample data. Used by tests and CI.
+_base_: default.yaml
+run:
+  name: smoke
+data:
+  files: [processed_data/samples/smoke.csv]
+target:
+  type: inprocess
+  inprocess:
+    server_config: [src/config/server/mock.yaml]
+metrics:
+  bootstrap: 200

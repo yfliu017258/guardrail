@@ -1,0 +1,51 @@
+# LiteLLM proxy (v1.92.0) — wire the OJT guardrail service in via the built-in Generic Guardrail API.
+# Contract: litellm/proxy/guardrails/guardrail_hooks/generic_guardrail_api/generic_guardrail_api.py
+#   POST {api_base}/beta/litellm_basic_guardrail_api   (path is appended automatically)
+#   response.action: NONE | BLOCKED | GUARDRAIL_INTERVENED (texts replaced)
+
+model_list:
+  - model_name: internal-llm
+    litellm_params:
+      model: openai/your-internal-model
+      api_base: os.environ/INTERNAL_LLM_API_BASE
+      api_key: os.environ/INTERNAL_LLM_API_KEY
+
+guardrails:
+  # input guard: runs before the LLM call; a block never reaches the model
+  - guardrail_name: ojt-guard-pre
+    litellm_params:
+      guardrail: generic_guardrail_api
+      mode: pre_call
+      api_base: os.environ/OJT_GUARDRAIL_API_BASE      # e.g. http://guardrail-svc:8080
+      api_key: os.environ/OJT_GUARDRAIL_API_KEY        # sent as x-api-key; equals GUARDRAIL_API_KEY on the service
+      default_on: true
+      unreachable_fallback: fail_open                  # guard down -> traffic flows (CRITICAL log). fail_closed for strict routes
+      fail_on_error: true
+      skip_system_message_in_guardrail: true           # system prompts are ours; check user/assistant turns only
+      additional_provider_specific_params:
+        policy: enterprise_v1
+
+  # output guard: runs on the model response (non-streaming + sampled streaming chunks)
+  - guardrail_name: ojt-guard-post
+    litellm_params:
+      guardrail: generic_guardrail_api
+      mode: post_call
+      api_base: os.environ/OJT_GUARDRAIL_API_BASE
+      api_key: os.environ/OJT_GUARDRAIL_API_KEY
+      default_on: true
+      unreachable_fallback: fail_open
+      streaming_end_of_stream_only: false              # check every Nth chunk while streaming
+      streaming_sampling_rate: 5
+
+  # shadow / A-B: a second service instance with a candidate model, opt-in per request
+  # ("guardrails": ["ojt-guard-pre-candidate"]) or per key/team in the admin UI.
+  - guardrail_name: ojt-guard-pre-candidate
+    litellm_params:
+      guardrail: generic_guardrail_api
+      mode: pre_call
+      api_base: os.environ/OJT_GUARDRAIL_CANDIDATE_API_BASE
+      api_key: os.environ/OJT_GUARDRAIL_API_KEY
+      default_on: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

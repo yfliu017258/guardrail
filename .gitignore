@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+*.egg-info/
+data/raw/*
+!data/raw/.gitkeep
+processed_data/*
+!processed_data/.gitkeep
+!processed_data/samples/
+results/*
+!results/.gitkeep
+src/config/server/policies/internal_rules.yaml

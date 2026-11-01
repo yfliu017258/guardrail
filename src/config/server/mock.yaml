@@ -1,0 +1,14 @@
+# GPU-free config for tests / CI / demos.
+_base_: default.yaml
+server:
+  api_key_env: null
+pipeline:
+  strategy: parallel
+  stages:
+    - name: rules
+      type: regex
+      apply_to: [request, response]
+    - name: mock_guard
+      type: mock
+      threshold: 0.4
+      apply_to: [request, response]

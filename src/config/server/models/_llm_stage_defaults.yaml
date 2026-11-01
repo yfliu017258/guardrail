@@ -1,0 +1,4 @@
+# Shared defaults for single-LLM-stage presets (each preset: `_base_: [../default.yaml, _llm_stage_defaults.yaml]`).
+pipeline:
+  strategy: sequential
+  stages: []      # every preset redefines its stage list completely (lists are replaced, not merged)

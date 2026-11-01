@@ -1,0 +1,15 @@
+# Copy to internal_rules.yaml (git-ignored) and fill with real internal terms.
+# action: block -> reject request | mask -> replace match, let request through (GUARDRAIL_INTERVENED)
+- name: project_codename
+  pattern: "\\b(PROJECT_ALPHA|PROJECT_BETA)\\b"     # placeholder codenames
+  category: confidential
+  action: block
+  ignore_case: true
+- name: classification_marker
+  pattern: "(機密等級|Confidential\\s*-\\s*Internal|限閱)"
+  category: confidential
+  action: block
+- name: employee_id
+  pattern: "\\b[0-9]{6}\\b(?=.*工號)"
+  category: privacy_pii
+  action: mask

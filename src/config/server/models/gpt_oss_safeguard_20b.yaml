@@ -1,0 +1,22 @@
+# openai/gpt-oss-safeguard-20b — bring-your-own-policy reasoning guard (Apache-2.0, MXFP4 ~14 GB -> fits).
+# Reasoning tokens make it slow on 1/7 of an H200: use for offline labelling, policy prototyping, or as a
+# 2nd stage on items flagged/uncertain by a cheaper stage. Serve with a reasoning parser so CoT is separated:
+#   MODEL=openai/gpt-oss-safeguard-20b EXTRA_ARGS="--reasoning-parser openai_gptoss" deploy/vllm/serve_guard.sh
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: gpt-oss-safeguard-20b}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: openai/gpt-oss-safeguard-20b
+      parser: json_policy
+      prompt_mode: policy
+      policy_file: src/config/server/policies/enterprise_policy.md
+      extra_body: {reasoning_effort: low}
+      max_tokens: 512                 # includes reasoning tokens
+      logprobs: false
+      timeout: 30
+      apply_to: [request, response]
+      on_error: fail_open

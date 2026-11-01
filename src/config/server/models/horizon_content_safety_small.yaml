@@ -1,0 +1,33 @@
+# Horizon-Labs/content-safety-guard-small (141M, Apache-2.0) — multi-label sigmoid head distilled from
+# Qwen3Guard-Gen-8B; zh PolyGuard F1 0.808 per card; XSTest false-flag 0.22 at 0.5 (over-blocks) -> calibrate.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: horizon-content-safety-small}
+pipeline:
+  stages:
+    - name: content_clf
+      type: hf_classifier
+      model: Horizon-Labs/content-safety-guard-small
+      activation: sigmoid
+      unsafe_labels: [unsafe]
+      pair_response: true             # output check on (prompt, response)
+      category_labels:
+        hate: hate_harassment
+        harassment: hate_harassment
+        profanity: hate_harassment
+        violence: violence
+        weapons: weapons_cbrn
+        sexual: sexual
+        sexual_minors: child_safety
+        self_harm: self_harm
+        criminal_planning: crime
+        drugs: crime
+        fraud_manipulation: crime
+        privacy: privacy_pii
+        misinformation: misinformation
+        unauthorized_advice: misinformation
+        other: other
+      max_length: 1024
+      stride: 128
+      threshold: 0.5
+      apply_to: [request, response]
+      on_error: fail_open

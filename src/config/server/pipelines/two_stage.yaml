@@ -1,0 +1,37 @@
+# Recommended starting architecture (benchmark it against the single-model presets):
+#   request : rules -> fast PI classifier (ms) -> Qwen3Guard-Gen-4B (tens of ms)
+#   response: rules -> Qwen3Guard-Gen-4B
+# sequential strategy short-circuits: obvious injections never reach the LLM guard.
+_base_: ../default.yaml
+run: {name: two-stage}
+pipeline:
+  strategy: sequential
+  stages:
+    - name: rules
+      type: regex
+      rules_file: src/config/server/policies/internal_rules.yaml
+      apply_to: [request, response]
+    - name: injection_clf
+      type: hf_classifier
+      model: Horizon-Labs/prompt-injection-guard-base
+      unsafe_labels: [INJECTION]
+      max_length: 2048
+      stride: 512
+      threshold: 0.8                  # set from the ROC of your eval run, not the card default
+      category: prompt_injection
+      apply_to: [request]
+      on_error: fail_open
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: Qwen/Qwen3Guard-Gen-4B
+      parser: qwen3guard
+      parser_options: {controversial_as_unsafe: true, ignore_categories: ["Politically Sensitive Topics"]}
+      prompt_mode: chat_template
+      max_tokens: 32
+      logprobs: true
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request, response]
+      on_error: fail_open

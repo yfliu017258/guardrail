@@ -1,0 +1,24 @@
+# Qwen/Qwen3Guard-Gen-4B — Apache-2.0, 119 langs, Safe/Unsafe/Controversial + Jailbreak + refusal flag.
+# serve: MODEL=Qwen/Qwen3Guard-Gen-4B MAX_LEN=8192 deploy/vllm/serve_guard.sh
+# caveats: fixed taxonomy (no custom policy); "Politically Sensitive Topics" follows PRC norms -> ignored below,
+#          measure it explicitly on zh-TW political text; check internal policy on PRC-origin weights.
+_base_: [../default.yaml, _llm_stage_defaults.yaml]
+run: {name: qwen3guard-gen-4b}
+pipeline:
+  stages:
+    - name: llm_guard
+      type: openai_guard
+      base_url: http://localhost:8000/v1
+      api_key_env: VLLM_API_KEY
+      model: Qwen/Qwen3Guard-Gen-4B
+      parser: qwen3guard
+      parser_options: {controversial_as_unsafe: true, ignore_categories: ["Politically Sensitive Topics"]}
+      prompt_mode: chat_template      # no system prompt; the chat template embeds the policy
+      context_turns: 4
+      max_tokens: 32
+      logprobs: true
+      top_logprobs: 5
+      threshold: 0.5
+      timeout: 10
+      apply_to: [request, response]
+      on_error: fail_open

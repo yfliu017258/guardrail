@@ -1,0 +1,69 @@
+# Data pipeline config:  python -m src.converters --config src/config/data.yaml
+#                        python -m src.converters.mix --config src/config/data.yaml
+# Every entry -> processed_data/<name>/<split>.csv + manifest.json.
+# `revision`: pin the HF commit sha once you have picked a version (several repos changed in 2026).
+# `license` matters: NC = non-commercial -> ask legal before using even for internal evaluation.
+raw_dir: data/raw
+processed_dir: processed_data
+
+datasets:
+  # ---------------- content safety (prompt + response) ----------------
+  aegis2: {splits: [test]}                                   # CC-BY-4.0, human labels, en
+  nemotron_safety_v3_zh: {converter: nemotron_safety_v3, languages: [zh], splits: [test]}          # zh-CN
+  nemotron_safety_v3_zhtw: {converter: nemotron_safety_v3, languages: [zh], splits: [test], opencc: s2twp}  # machine zh-TW
+  polyguard_prompts: {languages: [Chinese, English]}         # CC-BY-4.0, WildGuardTest translated
+  wildguardtest: {enabled: false}                            # gated (AI2 form) -> enable after access
+  toxic_chat: {enabled: false}                               # CC-BY-NC-4.0 -> legal review first
+  openai_moderation: {}
+  beavertails: {enabled: false}                              # CC-BY-NC-4.0
+  chinesesafe: {enabled: false}                              # CC-BY-NC-4.0, noisy; political subject auto-dropped
+
+  # ---------------- prompt injection / jailbreak ----------------
+  pi_eval_suite: {}                                          # over-defense + direct + indirect, unified schema
+  boundary_pairs: {}                                         # benign/attack minimal pairs
+  notinject: {}                                              # over-defense FPR
+  in_the_wild_jailbreak: {date: "2023_12_25", limit: 3000}
+  jbb_behaviors: {}
+  harmbench: {}
+
+  # ---------------- over-refusal / multilingual ----------------
+  xstest: {}
+  or_bench: {}
+  multijail_zhtw: {converter: multijail, languages: [zh], opencc: s2twp}
+
+  # ---------------- PII / secrets (detection, for the rules/mask stage) ----------------
+  tw_pii_bench: {ignore_labels: [private_date]}
+  seatbelt_pii_heldout: {}
+
+  # ---------------- internal (never commit the raw files) ----------------
+  internal_redteam:
+    enabled: false
+    converter: local_file
+    path: data/raw/internal_redteam.jsonl
+    columns: {prompt: prompt, label: label, category: category}
+    label_map: {"1": unsafe, "0": safe}
+  saas_baseline_log:                                         # labelled samples from the current SaaS + prompt setup
+    enabled: false
+    converter: local_file
+    path: data/raw/saas_labelled.csv
+    columns: {prompt: input, label: human_label, category: reason}
+
+# Frozen evaluation mixes. Bump the version instead of editing a released mix.
+mixes:
+  core_v1:
+    seed: 42
+    parts:
+      - {file: processed_data/aegis2/test.csv, n: 1200}
+      - {file: processed_data/polyguard_prompts/test.csv, n: 1200, filter: {language: [zh-CN]}}
+      - {file: processed_data/nemotron_safety_v3_zhtw/test.csv, n: 800}
+      - {file: processed_data/pi_eval_suite/test.csv, n: 1500}
+      - {file: processed_data/boundary_pairs/test.csv}
+      - {file: processed_data/notinject/test.csv}
+      - {file: processed_data/xstest/test.csv}
+      - {file: processed_data/or_bench/test.csv, n: 600}
+  zhtw_v1:                                                   # zh-TW focused; replace machine-converted parts with human-reviewed data ASAP
+    seed: 42
+    parts:
+      - {file: processed_data/nemotron_safety_v3_zhtw/test.csv, n: 1500}
+      - {file: processed_data/multijail_zhtw/test.csv}
+      - {file: processed_data/tw_pii_bench/test.csv}
