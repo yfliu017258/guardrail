@@ -77,3 +77,67 @@ LiteLLM request ──► build_inputs()  (request_scope: last_user | all_user |
 | 中斷續跑：`predictions.jsonl` 逐筆寫入；transport 失敗的列會在 `--resume` 時重跑 | `runner.py` |
 | 只重算指標（換 threshold）不重跑模型 | `--rescore <run_dir> --set metrics.threshold=0.3` |
 | 推論決定性：`temperature: 0`、可設 `seed`；vLLM batch 不同仍可能有極小差異 → 用 CI 判斷差異是否顯著 | server preset |
+
+## 5. 擴充點：Registry + 類別階層
+
+所有可擴充的元件都用同一個 `Registry`（`src/common/registry.py`）：`@REG.register("name")` 註冊類別，`REG.build(cfg)` 依 `cfg["type"]` 建立物件（類別有 `from_config` 時呼叫 `from_config`）。plug-in 模組採 lazy import：某個模組 import 失敗不會連帶影響其他元件，查詢不到名稱時，錯誤訊息會一併列出可用名稱與 import 失敗的原因。
+
+| Registry | 位置 | base class | 由 config 的哪個 key 選擇 | 列出 |
+|---|---|---|---|---|
+| `CONVERTERS` | `src/converters/base.py` | `BaseConverter` | `data.yaml` 的 `converter:`（預設為 key 名稱） | `python -m src.converters --list` |
+| `BACKENDS` | `src/server/backends/base.py` | `GuardBackend` | stage `type:` | — |
+| `PARSERS` | `src/server/backends/parsers.py` | `OutputParser` | stage `parser:` + `parser_options:` | — |
+| `PROMPT_BUILDERS` | `src/server/backends/prompts.py` | `PromptBuilder` | stage `prompt_mode:` | — |
+| `TASKS` | `src/evaluation/tasks/base.py` | `EvalTask` | `task.type:` | `python -m src.evaluation --list` |
+| `TARGETS` | `src/evaluation/targets.py` | `Target` | `target.type:`（guardrail task） | 同上 |
+| `GENERATORS` | `src/evaluation/generation.py` | `Generator` | `task.model_safety.generator.type:` | 同上 |
+| `REFUSAL_JUDGES` | `src/refuse_judge/base.py` | `RefusalJudge` | `judge.type:` | `python -m src.refuse_judge --list` |
+
+### 5.1 Dataset converters：資料來源 × 對應樣板
+
+```
+BaseConverter            template method: run() -> records(split) -> convert(record) -> GuardrailSample(s)
+├─ 資料來源（records）    HFDatasetSource · HFFilesSource · MultiConfigHFSource · LocalFileSource
+└─ 對應樣板（convert）    TextLabelConverter ─┬─ UnsafeOnlyConverter / SafeOnlyConverter
+                                              └─ _SpanPIIConverter
+                          PromptResponseConverter ─┬─ _AegisLike (aegis2, nemotron_safety_v3)
+                                                   ├─ _WildGuardLike (wildguardtest, polyguard_prompts)
+                                                   └─ beavertails, rtp_lx, xstest_responses
+具體資料集 = 來源 + 樣板，例如  class Aegis2(HFDatasetSource, _AegisLike)
+```
+
+新增一個資料集：
+
+```python
+@register("my_injection_set")
+class MyInjectionSet(HFDatasetSource, TextLabelConverter):
+    """One line: what it is, why it is here, caveats."""
+    hf_id = "org/dataset"; license = "cc-by-4.0"
+    text_field = "text"; label_field = "label"; positive_values = {"1"}; negative_values = {"0"}
+    category = "prompt_injection"; attack_type = "direct"
+    # 只在欄位對應表達不了時才 override：keep() / categories() / lang() / meta() / expand()
+```
+
+接著在 `src/config/data.yaml` 加一筆，測試時 patch `conv.records`（參考 `tests/test_converters.py`）。
+
+### 5.2 Guard stage：backend × prompt builder × parser
+
+```
+GuardBackend [BACKENDS]: regex · hf_classifier · mock · openai_guard
+openai_guard = PromptBuilder [PROMPT_BUILDERS] (chat_template · policy · chat_user_template · completion)
+             + OutputParser  [PARSERS] (llama_guard · qwen3guard · granite_guardian · wildguard · nemotron ·
+                                         nemotron35 · aprielguard · json_policy · yes_no)
+```
+
+新的模型家族通常只需要一個 `OutputParser` subclass（實作 `_parse`，宣告 `OPTIONS` / `CATEGORY_MAP` / `SCORE_SPEC`）。如果 prompt 形狀也特殊，再加一個 `PromptBuilder`，`openai_guard` 本身不用改。
+
+### 5.3 Evaluation：task × (target | generator + judge)
+
+```
+EvalTask [TASKS]
+├─ guardrail      -> Target [TARGETS]: inprocess · guardrail_server · litellm_apply_guardrail · litellm_chat
+├─ model_safety   -> Generator [GENERATORS]: openai_chat · mock   +  RefusalJudge  (+ optional harm GuardPipeline)
+└─ refusal_judge  -> RefusalJudge [REFUSAL_JUDGES]: keyword · llm · qwen3guard_refusal · hf_classifier · cascade · vote
+```
+
+task 決定三件事：`select()`（哪些樣本適用）、`gold()` 與 `predict()`（什麼算 positive）、`extra_metrics()`。runner、metrics、report、resume / rescore、contamination 都是共用的。詳細說明見 `docs/model_safety.md`。

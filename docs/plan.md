@@ -20,6 +20,7 @@
 | G1 | 找到適合公司 guardrail 需求的資料集 | `src/converters/*`、`src/config/data.yaml`、固定版本的 eval mix（`core_v1`、`zhtw_v1`） | 每個資料集有 manifest（來源、revision、license、sha256）；zh-TW 有人工審過的子集 |
 | G2 | 找到適合的模型（H200 1g.35gb） | `src/config/server/models/*.yaml`、各模型 eval 結果、leaderboard | 至少 3 個候選在同一 eval mix 上比較 recall@FPR、zh-TW 切片、p95 latency |
 | G3 | 自動、可重現、高品質的 evaluation 程式 | `src/evaluation/*`、`results/<run>/` | 同 config + 同資料 → 同結果；每次 run 都有 config snapshot、資料 hash、git sha、錯誤樣本 |
+| G3b | 裸模型安全基準 | `src/refuse_judge` + `task: model_safety` / `refusal_judge` | Qwen3.6-27B、GLM-5.3-Flash 在同一份 eval mix 上的拒答率、過度拒答率、partial 率；judge 本身在人工標註資料上的 precision/recall 與 κ 有報告 |
 | G4 | 上線整合 | `src/server`（uvicorn）+ `src/litellm_admin`（admin API 宣告式管理）+ `deploy/litellm/guardrails.yaml` | 不改 proxy config file，透過 admin API 註冊 `generic_guardrail_api`；先掛 pilot team，再 `default_on`；每次變更有 audit |
 
 ## 3. 架構
@@ -46,12 +47,14 @@ flowchart LR
 3. **Stage pipeline**：`rules → classifier → LLM guard`，`sequential` 模式下會 short-circuit（便宜的 stage 先擋），evaluation 時用 `run_all` 收集每個 stage 的結果。
 4. **分數優先於 hard label**：從 vLLM logprobs 取 P(unsafe)，才能畫 ROC、選 threshold、報 recall@FPR=1%。
 5. **同一個 harness 評測 baseline**：現有 SaaS / prompt 方式用 `llm_judge_baseline.yaml` 重現，和新模型在同一份資料上比較。
+6. **裸模型與 guardrail 分開量測**：`model_safety` 量模型本身的拒答行為，`guardrail` 量攔截效果。兩者共用資料、runner、metrics；被 proxy guardrail 擋下的請求可以算作 refusal，用來量「系統」層級的表現。
 
 ## 4. 時程（4 週，依目前進度調整）
 
 | 週 | 主題 | 具體工作 | 檢查點 |
 |---|---|---|---|
 | W1 | Evaluation 基礎 + baseline | 定 schema / taxonomy；converters（Aegis2、PolyGuard、PI suite、XSTest、NotInject）；凍結 `core_v1`；跑 **現有 SaaS/prompt baseline** | baseline 報告：recall、FPR、zh 切片、latency |
+| W1.5 | 裸模型基準 | 驗證 refusal judge（XSTest-v2 回覆、PolyGuard）；跑 Qwen3.6-27B / GLM-5.3-Flash 的 `model_safety`（thinking 開或關都測） | 模型本身「擋得住多少、誤拒多少」→ 決定 guardrail 需要多嚴 |
 | W2 | 模型篩選 | vLLM 部署到 MIG；跑 Qwen3Guard-Gen 0.6B/4B/8B、Nemotron-3.5、Nemotron-8B-v3、Llama-Guard-3（英文參考）、PI classifier | leaderboard + 每個模型 `errors.csv` 人工看 50 筆 |
 | W3 | zh-TW 與公司情境 | OpenCC s2twp 轉換 + 人工審；手寫 300–1000 筆 zh-TW golden set（含「看起來危險但正常」的製程/工程 prompt）；調 threshold；兩階段架構實驗 | `zhtw_v1` 結果；選定 threshold 與架構 |
 | W4 | 整合與交付 | 用 admin API 註冊 guardrail（`default_on: false`）→ `attach --team <pilot>` → 觀察 → `default_on: true`；壓測 p95；fail-open/closed 策略；文件與交接 | 上線提案（含數據）、runbook |

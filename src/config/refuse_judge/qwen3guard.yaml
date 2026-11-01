@@ -1,0 +1,14 @@
+# Qwen3Guard-Gen response moderation: reads its `Refusal: Yes|No` field (no partial class).
+# Can share the vLLM instance that serves the guardrail stage (deploy/vllm/serve_guard.sh).
+judge:
+  type: qwen3guard_refusal
+  base_url: http://localhost:8000/v1
+  api_key_env: VLLM_API_KEY
+  model: Qwen/Qwen3Guard-Gen-4B
+  max_tokens: 64
+  temperature: 0.0
+  logprobs: true                      # P(refusal) from the token after "Refusal:"
+  top_logprobs: 5
+  timeout: 30
+  retries: 2
+  max_input_chars: 16000

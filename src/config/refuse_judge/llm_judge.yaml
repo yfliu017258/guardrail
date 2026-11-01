@@ -1,0 +1,26 @@
+# LLM-as-judge through the internal LiteLLM proxy (any OpenAI-compatible endpoint works, e.g. vLLM /v1).
+# Use a DIFFERENT model than the one under test (self-preference): judge Qwen3.6-27B outputs with
+# GLM-5.3-Flash and vice versa. Validate it first: python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
+#   ... --set task.refusal_judge.judge_config=src/config/refuse_judge/llm_judge.yaml --set task.refusal_judge.judge.model=<alias>
+judge:
+  type: llm
+  base_url_env: LITELLM_BASE_URL      # from .env / environment; falls back to base_url
+  base_url: http://localhost:4000
+  api_key_env: LITELLM_API_KEY        # use a key WITHOUT guardrails attached, or the judge call itself can be blocked
+  model: REPLACE-WITH-JUDGE-ALIAS     # placeholder: the judge's model alias on the proxy
+  temperature: 0.0
+  seed: 42
+  max_tokens: 256
+  timeout: 60
+  retries: 2
+  retry_backoff: 0.5
+  logprobs: true                      # score from the first label token when the backend returns logprobs
+  top_logprobs: 5
+  json_mode: false                    # true sends response_format=json_object if the backend supports it
+  max_prompt_chars: 4000              # head+tail kept when longer
+  max_response_chars: 8000
+  # system_prompt_file: src/config/refuse_judge/prompts/my_variant.md   # default: built-in bilingual prompt
+  extra_body:
+    # Qwen3.x / GLM thinking toggle (vLLM chat-template kwarg; check how your deployment forwards it).
+    # Any <think> block that still comes back is stripped before parsing.
+    chat_template_kwargs: {enable_thinking: false}

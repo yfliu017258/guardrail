@@ -3,25 +3,32 @@
 為內部 LiteLLM proxy（v1.92.0）設計 input/output guardrail 的 OJT 專案參考實作：
 
 - **`src/server`**：FastAPI + uvicorn 的 guardrail 服務，實作 LiteLLM 內建 `generic_guardrail_api` 的協定；多 stage pipeline，依序為 regex 規則、輕量 classifier、vLLM 上的 LLM guard。
+- **`src/refuse_judge`**：判斷模型回覆是否拒答（keyword / LLM / Qwen3Guard / classifier / cascade / vote），用於**裸模型**安全評測（Qwen3.6-27B、GLM-5.3-Flash）。
 - **`src/evaluation`**：自動、可重現的評測 CLI。可評測 in-process pipeline、guardrail 服務，或真正的 LiteLLM proxy。輸出 metrics（含 CI、ROC、recall@FPR）、切片、錯誤樣本，以及 config snapshot。
 - **`src/litellm_admin`**：沒有 proxy config file 權限時，透過 LiteLLM admin API 以宣告式方式管理 guardrail（plan / apply / attach / test），每次變更都留 audit。
 - **`src/converters`**：把公開或內部資料集轉成統一 CSV（`processed_data/`），附 manifest，並能凍結版本化的 eval mix。
 
-計劃、調查與設計：[`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)
+計劃、調查與設計：[`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
+
+所有可擴充元件（converters、guard backends / parsers / prompt builders、evaluation tasks / targets / generators、refusal judges）都是註冊在同一個 `Registry` 的類別，新增功能 = 寫一個 subclass + 一行 `@REG.register("name")`。
 
 ## 目錄
 
 ```
 src/
   config/
-    config.py            # YAML 合併(_base_) → args → --set；.env → config["envs"]；dump 時遮蔽 secrets
-    server/              # default.yaml, mock.yaml, models/*.yaml（各模型 preset）, pipelines/, policies/
-    evaluation/          # default.yaml, smoke.yaml
+    config.py            # YAML 合併(_base_) → args → --set；.env → config["envs"]；dump 時只記錄 env 名稱、遮蔽 secrets
+    server/              # default.yaml, mock.yaml, models/*.yaml（各 guard 模型 preset）, pipelines/, policies/
+    evaluation/          # default / smoke / model_safety / refusal_judge (+ smoke_*) .yaml
+    models/              # 裸模型 generator preset：qwen3_6_27b.yaml, glm_5_3_flash.yaml
+    refuse_judge/        # keyword / llm_judge / qwen3guard / cascade .yaml
     data.yaml            # converters + 固定 eval mix
-  data_schema/           # GuardrailSample（CSV 格式唯一定義處）、taxonomy 對照表、語言偵測
-  converters/            # base.py（registry/manifest）, datasets/*.py, mix.py, __main__.py
-  server/                # app.py, pipeline.py, schemas.py, backends/{regex,hf_classifier,openai_guard,mock,parsers}.py
-  evaluation/            # dataset.py, targets.py, runner.py, metrics.py, report.py, compare.py
+  common/registry.py     # 共用 Registry（register / get / build / describe, lazy plug-ins）
+  data_schema/           # GuardrailSample（CSV 格式唯一定義處，含 refusal_label）、taxonomy 對照表、語言偵測
+  converters/            # base.py（BaseConverter + CONVERTERS）, sources.py, templates.py, datasets/*.py, mix.py
+  server/                # app.py, pipeline.py, schemas.py, backends/{base,regex,hf_classifier,openai_guard,prompts,parsers,mock}.py
+  evaluation/            # tasks/{base,guardrail,refusal}.py, targets.py, generation.py, runner.py, metrics.py, report.py, compare.py
+  refuse_judge/          # base.py（RefusalJudge + REFUSAL_JUDGES）, keyword / llm / guard / classifier / ensemble, __main__.py
   litellm_admin/         # client.py（admin API）, __main__.py（list/plan/apply/delete/attach/test/export）
 deploy/litellm/guardrails.yaml     # 期望的 guardrails（admin API 用，進 git 版控）
 deploy/litellm/proxy_config.yaml   # config-file 寫法參考（本專案不需要改）
@@ -53,6 +60,12 @@ MIG_UUID=MIG-xxxx MODEL=Qwen/Qwen3Guard-Gen-4B deploy/vllm/serve_guard.sh
 # 4) 評測：in-process（最快的迭代迴圈）
 python -m src.evaluation --server-config src/config/server/models/qwen3guard_gen_4b.yaml \
     --data processed_data/mixes/core_v1.csv --run-name qwen3guard-4b
+
+# 4b) 裸模型安全：先驗證 refusal judge，再評測模型（見 docs/model_safety.md）
+python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
+python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
+python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml       # 不需 GPU 的冒煙測試
+python -m src.evaluation --list                                                        # 所有 task / target / generator / judge
 
 # 5) 比較
 python -m src.evaluation.compare results/*/ --sort f1 -o results/leaderboard.md
