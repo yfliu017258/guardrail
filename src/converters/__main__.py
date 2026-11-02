@@ -1,17 +1,21 @@
-"""Convert raw datasets into the unified CSV format.
+"""Convert raw datasets into the two-column CSV format (``prompt,expected``).
 
     python -m src.converters --list
-    python -m src.converters --dataset toxic_chat --splits test
-    python -m src.converters --dataset toxic_chat aegis2 wildguardmix --limit 5000
+    python -m src.converters --dataset toxic_chat                       # -> processed_data/toxic_chat.csv
+    python -m src.converters --dataset aegis2 --splits test train       # -> aegis2.csv + aegis2.train.csv
+    python -m src.converters --dataset toxic_chat aegis2 --limit 5000
     python -m src.converters --config src/config/data.yaml            # everything listed there
     python -m src.converters --dataset local_file --set path=data/raw/internal_redteam.jsonl \
-        --set columns.prompt=question --set columns.label=is_attack --set label_map.1=unsafe --set label_map.0=safe
-    python -m src.converters --dataset local_file ... --set 'label_map={"1": unsafe, "0": safe}'   # same, one flag
-    python -m src.converters.mix --config src/config/data.yaml        # build fixed eval mixes
+        --set columns.prompt=question --set columns.label=is_attack --set label_map.1=block --set label_map.0=pass
+    python -m src.converters --dataset local_file ... --set 'label_map={"1": block, "0": pass}'   # same, one flag
+    python -m src.converters.mix --config src/config/data.yaml        # build frozen eval mixes
+
+Each converter writes ``<processed_dir>/<name>.csv`` (+ ``<name>.<split>.csv`` for non-eval splits)
+and ``<name>.manifest.json``; see src/converters/base.py.
 
 ``--set a.1=x`` normally means "list index 1"; for the mapping options a converter declares in
-``MAPPING_OPTIONS`` (local_file: columns / label_map / category_map) a missing mapping is created
-first, so ``label_map.1`` is the key ``"1"``.
+``MAPPING_OPTIONS`` (local_file: columns / label_map) a missing mapping is created first, so
+``label_map.1`` is the key ``"1"``.
 
 ``--list`` exits non-zero (after listing what did load) when a converter module failed to import.
 """
@@ -66,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         for k, v in parse_overrides(a.overrides):  # parsed per job: YAML values must not be shared between jobs
             head = k.split(".", 1)[0]
             if "." in k and head in mapping_options and not isinstance(job.get(head), dict):
-                job[head] = {}  # `label_map.1=unsafe`: "1" is a key here, not a list index
+                job[head] = {}  # `label_map.1=block`: "1" is a key here, not a list index
             set_by_path(job, k, v)
         # `converter:` lets one class produce several named outputs (nemotron_safety_v3_zh / _zhtw)
         conv = CONVERTERS.build(job, type_key="converter", default=name, name=name, raw_dir=raw_dir,

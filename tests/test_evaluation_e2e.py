@@ -22,7 +22,7 @@ def test_smoke_run_against_server_and_resume(mock_server, tmp_path):
               "errors.csv", "slices.csv"):
         assert (run_dir / f).exists(), f
     m = json.loads((run_dir / "metrics.json").read_text())
-    assert m["n_total"] == 30 and m["overall"]["recall"] is not None and m["per_stage"]
+    assert m["n_total"] == 27 and m["overall"]["recall"] is not None and m["per_stage"]
     task = json.loads((run_dir / "task.json").read_text())
     assert task["type"] == "guardrail_server" and task["base_url"] == mock_server.url
     assert task["server_config_hash"] and {s["name"] for s in task["stages"]} == {"rules", "mock_guard"}
@@ -91,7 +91,7 @@ def test_inprocess_target_still_available(tmp_path):
     main(["--config", "src/config/evaluation/smoke.yaml", "--target", "inprocess", "--output-dir", str(tmp_path), *NOENV,
           "--set", "target.inprocess.server_config=[src/config/server/mock.yaml]"])
     (run_dir,) = list(tmp_path.iterdir())
-    assert json.loads((run_dir / "metrics.json").read_text())["n_total"] == 30
+    assert json.loads((run_dir / "metrics.json").read_text())["n_total"] == 27
 
 
 def _rows(run):
@@ -104,7 +104,7 @@ def test_live_stage_errors_are_errors_not_safe_on_both_endpoints(tmp_path, endpo
         run = _eval(srv, tmp_path, "--endpoint", endpoint, "--set", "eval.retries=0")
     m = json.loads((run / "metrics.json").read_text())
     errored = [r for r in _rows(run) if r["pred_positive"] is None]
-    assert m["n_errors"] == len(errored) >= 2 and all("ransomware" in r["text_preview"].lower() for r in errored)
+    assert m["n_errors"] == len(errored) >= 1 and all("ransomware" in r["text_preview"].lower() for r in errored)
 
 
 def test_shadow_stage_errors_and_votes_never_decide(tmp_path):
@@ -112,7 +112,7 @@ def test_shadow_stage_errors_and_votes_never_decide(tmp_path):
     with BackgroundServer(["src/config/server/mock.yaml"], overrides=shadow) as srv:
         run = _eval(srv, tmp_path)
     m = json.loads((run / "metrics.json").read_text())
-    assert m["n_errors"] == 0 and m["n_scored"] == 30                       # a broken candidate breaks no row
+    assert m["n_errors"] == 0 and m["n_scored"] == 27                       # a broken candidate breaks no row
     assert all(r["shadow_stages"] == ["candidate"] or "candidate" not in r["stage_unsafe"] for r in _rows(run))
     main(["--rescore", str(run), *NOENV, "--set", "metrics.score_stage=mock_guard", "--set", "metrics.threshold=0.99"])
     (sub,) = [p for p in run.iterdir() if p.name.startswith("rescore_0.99_")]
@@ -161,12 +161,17 @@ def test_identical_replicas_on_other_ports_are_the_same_guardrail(tmp_path):
     assert ia["pipeline_hash"] == ib["pipeline_hash"] and ia["config_hash"] != ib["config_hash"]
 
 
-def test_guardrail_api_rejects_prompt_context(mock_server, tmp_path):
-    with pytest.raises(ValueError, match="response_context"):
-        _eval(mock_server, tmp_path, "--endpoint", "guardrail_api", "--set", "target.guardrail_server.response_context=prompt")
-
 
 def test_stage_filter_is_what_task_json_reports(mock_server, tmp_path):
     run = _eval(mock_server, tmp_path, "--set", "target.guardrail_server.stages=[mock_guard]")
     task = json.loads((run / "task.json").read_text())
     assert [s["name"] for s in task["stages"]] == ["mock_guard"] and len(task["server_stages"]) == 2
+
+
+def test_expected_vs_action_including_mask(mock_server, tmp_path):
+    run = _eval(mock_server, tmp_path)
+    m = json.loads((run / "metrics.json").read_text())
+    mask = m["expected_vs_action"]["mask"]
+    assert mask["n"] == 3 and mask["match_rate"] == 1.0 and mask["actions"] == {"GUARDRAIL_INTERVENED": 3}
+    assert m["overall"]["n_unsafe"] == 12 and m["overall"]["n_safe"] == 15     # block vs pass+mask
+    assert "Expected vs server action" in (run / "report.md").read_text()

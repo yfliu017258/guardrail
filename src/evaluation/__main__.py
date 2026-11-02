@@ -3,22 +3,21 @@
 Tasks (``task.type``, registry ``TASKS``):
   guardrail      is the guardrail's block decision right?              (default)
   model_safety   does a BARE model refuse unsafe prompts / answer safe ones?   (generator + refusal judge)
-  refusal_judge  is the refusal judge itself accurate?  (human-labelled responses)
 
     # GPU-free smoke tests
     python -m src.evaluation --config src/config/evaluation/smoke.yaml
     python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml
 
+Data: CSV files with exactly two columns, ``prompt,expected`` (block | pass | mask); the file name is the
+source. ``--data`` takes files, globs or directories (a mix).
+
     # guardrail: evaluate a RUNNING guardrail server (python -m src.server --config ...)
-    python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv \
+    python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/ \
         --run-name qwen3guard4b
     python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api ...   # production endpoint
 
     # bare model: Qwen3.6-27B with a cascade refusal judge
     python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
-
-    # validate the refusal judge first
-    python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
 
     # resume an interrupted run / recompute metrics only
     python -m src.evaluation --resume results/<run_dir>

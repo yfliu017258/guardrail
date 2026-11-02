@@ -11,13 +11,14 @@ task:
   type: guardrail            # guardrail | model_safety | refusal_judge   (python -m src.evaluation --list)
 
 data:
-  files:                      # processed CSVs or globs (relative to repo root)
-    - processed_data/mixes/core_v1.csv
+  # CSV files with exactly two columns: prompt,expected (block | pass | mask). The file name is the source.
+  files:                      # CSV paths, globs or directories (a mix directory = every *.csv in it)
+    - processed_data/mixes/core_v1/
   max_samples_per_file: null  # null = all rows
-  sampling: stratified        # stratified | balanced | random | head
-  input_types: [request, response]
-  languages: null             # e.g. [zh-TW, en]
-  sources: null
+  sampling: stratified        # stratified (by expected) | balanced | random | head
+  expected: null              # e.g. [block, pass]
+  languages: null             # detected from the prompt, e.g. [zh-TW, en]
+  sources: null               # file names, e.g. [aegis2, xstest]
   # duplicates (same sample_id) are always dropped: predictions are keyed by sample_id
 
 target:
@@ -31,13 +32,11 @@ target:
                               # guardrail_api: the production endpoint, decision only (what production returns)
     run_all: true             # classify: run every stage (no short-circuit) -> per-stage metrics
     stages: null              # classify: restrict to these stage names
-    response_context: none    # none = like production response checks (no prompt sent); prompt = add the user turn
     canary: true              # a known injection must be BLOCKED at startup, else abort (wrong config / fail-open)
   inprocess:
     server_config: [src/config/server/default.yaml]
     overrides: []             # dotted overrides applied to the server config
     run_all: true
-    response_context: none
 
 eval:
   concurrency: 16
@@ -55,7 +54,7 @@ metrics:
   bootstrap: 1000
   ci: 0.95
   fpr_targets: [0.01, 0.05]
-  slice_by: [source, language, input_type, attack_type]
+  slice_by: [source, language]
   min_slice_size: 1
 
 report:

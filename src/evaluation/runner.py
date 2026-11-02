@@ -14,7 +14,7 @@ from typing import Any
 from tqdm.asyncio import tqdm
 
 from ..config import get_by_path
-from ..data_schema import GuardrailSample
+from .dataset import EvalSample
 from .errors import TargetError
 
 log = logging.getLogger("evaluation")
@@ -63,7 +63,7 @@ def load_latest(pred_path: Path) -> list[dict]:
     return list(latest.values())
 
 
-async def run_predictions(task: Any, samples: list[GuardrailSample], cfg: dict[str, Any], pred_path: Path) -> list[dict]:
+async def run_predictions(task: Any, samples: list[EvalSample], cfg: dict[str, Any], pred_path: Path) -> list[dict]:
     """``task`` is an ``EvalTask`` (anything with ``async predict(sample) -> dict`` and ``registry_name``)."""
     concurrency = int(get_by_path(cfg, "eval.concurrency", 16))
     retries = int(get_by_path(cfg, "eval.retries", 3))
@@ -80,7 +80,7 @@ async def run_predictions(task: Any, samples: list[GuardrailSample], cfg: dict[s
     pred_path.parent.mkdir(parents=True, exist_ok=True)
     fh = pred_path.open("a", encoding="utf-8")
 
-    async def one(s: GuardrailSample) -> dict:
+    async def one(s: EvalSample) -> dict:
         async with sem:
             t_start = time.perf_counter()
             pred: dict | None = None
@@ -104,7 +104,7 @@ async def run_predictions(task: Any, samples: list[GuardrailSample], cfg: dict[s
                         "latency_ms": (time.perf_counter() - t_start) * 1000}
             rec = {**_sample_fields(s), **pred, "sample_id": s.sample_id}
             if rec.get("gold_positive") is None:  # failed rows still need ground truth for error_policy fills
-                rec["gold_positive"] = task.gold(s) if hasattr(task, "gold") else s.is_unsafe
+                rec["gold_positive"] = task.gold(s) if hasattr(task, "gold") else s.should_block
             if pred.get("pred_positive") is None and retry_flag and pred.get("error") == err:
                 rec["_retry"] = True  # transport failure: --resume will try this row again
             async with write_lock:
@@ -121,15 +121,10 @@ async def run_predictions(task: Any, samples: list[GuardrailSample], cfg: dict[s
     return [by_id[s.sample_id] for s in samples if s.sample_id in by_id]
 
 
-def _sample_fields(s: GuardrailSample) -> dict[str, Any]:
+def _sample_fields(s: EvalSample) -> dict[str, Any]:
     return {
         "source": s.source,
-        "split": s.split,
-        "input_type": s.input_type,
         "language": s.language,
-        "attack_type": s.attack_type,
-        "gold_label": s.label.value,
-        "gold_categories": [c.value for c in s.categories],
-        "gold_refusal_label": s.refusal_label,
-        "text_preview": s.text[:300],
+        "expected": s.expected,
+        "text_preview": s.prompt[:300],
     }

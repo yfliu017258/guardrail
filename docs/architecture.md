@@ -78,17 +78,22 @@ request ──► build_inputs()  (request_scope: last_user | all_user | all_tex
 | `GENERATORS` | `src/evaluation/generation.py` | `Generator` | `task.model_safety.generator.type:` | 同上 |
 | `REFUSAL_JUDGES` | `src/refuse_judge/base.py` | `RefusalJudge` | `judge.type:` | `python -m src.refuse_judge --list` |
 
-### 5.1 Dataset converters：資料來源 × 對應樣板
+### 5.1 Dataset converters：資料來源 × 對應樣板 → `prompt,expected`
 
 ```
-BaseConverter            template method: run() -> records(split) -> convert(record) -> GuardrailSample(s)
-├─ 資料來源（records）    HFDatasetSource · HFFilesSource · MultiConfigHFSource · LocalFileSource
-└─ 對應樣板（convert）    TextLabelConverter ─┬─ UnsafeOnlyConverter / SafeOnlyConverter
-                                              └─ _SpanPIIConverter
-                          PromptResponseConverter ─┬─ _AegisLike (aegis2, nemotron_safety_v3)
-                                                   ├─ _WildGuardLike (wildguardtest, polyguard_prompts)
-                                                   └─ beavertails, rtp_lx, xstest_responses
+BaseConverter            template method: run() -> records(split) -> convert(record) -> Sample(prompt, expected)
+                         共用：OpenCC、依 prompt 去重（同一 prompt 不同 expected = 衝突，丟棄並記錄）、
+                         seeded sample / limit、CSV + manifest
+├─ 資料來源（records）    HFDatasetSource ─┬─ HFFilesSource ─ MultiConfigHFSource · LocalFileSource
+└─ 對應樣板（convert）    TextLabelConverter（text_field + label_field → block / pass）
+                          ├─ UnsafeOnlyConverter（一律 block）/ SafeOnlyConverter（一律 pass）
+                          └─ _SpanPIIConverter（有 PII span → mask，否則 pass）
+                          PromptLabelConverter（prompt_field + prompt_label_field → block / pass）
+                          ├─ _AegisLike（aegis2, nemotron_safety_v3）
+                          ├─ _WildGuardLike（wildguardtest, polyguard_prompts）
+                          └─ rtp_lx
 具體資料集 = 來源 + 樣板，例如  class Aegis2(HFDatasetSource, _AegisLike)
+輸出：processed_data/<name>.csv（source = 檔名）+ <name>.manifest.json；mix：processed_data/mixes/<mix>/<source>.csv
 ```
 
 新增一個資料集：
@@ -98,9 +103,10 @@ BaseConverter            template method: run() -> records(split) -> convert(rec
 class MyInjectionSet(HFDatasetSource, TextLabelConverter):
     """One line: what it is, why it is here, caveats."""
     hf_id = "org/dataset"; license = "cc-by-4.0"
-    text_field = "text"; label_field = "label"; positive_values = {"1"}; negative_values = {"0"}
-    category = "prompt_injection"; attack_type = "direct"
-    # 只在欄位對應表達不了時才 override：keep() / categories() / lang() / meta() / expand()
+    text_field = "text"; label_field = "label"
+    positive_values = {"1"}   # -> expected: block
+    negative_values = {"0"}   # -> expected: pass；兩者都不是 = invalid（計數，不會默默變成 pass）
+    # 只在欄位對應表達不了時才 override：keep() / expand() / text() / is_positive() / expected()
 ```
 
 接著在 `src/config/data.yaml` 加一筆，測試時 patch `conv.records`（參考 `tests/test_converters.py`）。
@@ -121,8 +127,8 @@ openai_guard = PromptBuilder [PROMPT_BUILDERS] (chat_template · policy · chat_
 ```
 EvalTask [TASKS]
 ├─ guardrail      -> Target [TARGETS]: guardrail_server（預設，打 server）· inprocess
-├─ model_safety   -> Generator [GENERATORS]: openai_chat · mock   +  RefusalJudge  (+ optional harm GuardPipeline)
-└─ refusal_judge  -> RefusalJudge [REFUSAL_JUDGES]: keyword · llm · qwen3guard_refusal · hf_classifier · cascade · vote
+└─ model_safety   -> Generator [GENERATORS]: openai_chat · mock   +  RefusalJudge  (+ optional harm GuardPipeline)
+   （RefusalJudge [REFUSAL_JUDGES]: keyword · llm · qwen3guard_refusal · hf_classifier · cascade · vote）
 ```
 
 task 決定三件事：`select()`（哪些樣本適用）、`gold()` 與 `predict()`（什麼算 positive）、`extra_metrics()`。runner、metrics、report、resume / rescore、contamination 都是共用的。詳細說明見 `docs/model_safety.md`。

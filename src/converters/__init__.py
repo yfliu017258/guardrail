@@ -1,4 +1,5 @@
-"""Dataset -> ``GuardrailSample`` converters (see base.py for the framework, sources.py / templates.py for the bases)."""
+"""Dataset -> ``Sample(prompt, expected)`` converters (see base.py for the framework and output layout,
+sources.py / templates.py for the bases, mix.py for frozen eval mixes)."""
 
 from .base import CONVERTERS, BaseConverter, get_converter, register
 from .sources import (
@@ -8,7 +9,7 @@ from .sources import (
     MultiConfigHFSource,
 )
 from .templates import (
-    PromptResponseConverter,
+    PromptLabelConverter,
     SafeOnlyConverter,
     TextLabelConverter,
     UnsafeOnlyConverter,
@@ -21,7 +22,7 @@ __all__ = [
     "HFFilesSource",
     "LocalFileSource",
     "MultiConfigHFSource",
-    "PromptResponseConverter",
+    "PromptLabelConverter",
     "SafeOnlyConverter",
     "TextLabelConverter",
     "UnsafeOnlyConverter",

@@ -34,9 +34,8 @@ def write_slices_csv(run_dir: Path, metrics: dict[str, Any]) -> None:
 
 def write_errors(run_dir: Path, rows: list[dict], n: int, cfg: dict | None = None) -> None:
     """False positives / negatives for manual review — the most useful file in the run directory."""
-    cols = ["kind", "sample_id", "source", "language", "input_type", "gold_label", "gold_categories",
-            "gold_refusal_label", "refusal_label", "categories", "score", "blocked_by", "judge", "judge_reason",
-            "text_preview", "response", "raw", "error"]
+    cols = ["kind", "sample_id", "source", "language", "expected", "action", "categories", "score", "blocked_by",
+            "refusal_label", "judge", "judge_reason", "text_preview", "response", "raw", "error"]
     m = (cfg or {}).get("metrics", {}) or {}
     decided = final_decisions(rows, m.get("threshold"), "exclude", m.get("score_stage"))  # same rule as the metrics
     fps = [r for r in rows if decided.get(r.get("sample_id")) is True and not gold_of(r)]
@@ -48,10 +47,11 @@ def write_errors(run_dir: Path, rows: list[dict], n: int, cfg: dict | None = Non
     with (run_dir / "errors.csv").open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
-        for kind, group in (("false_positive", fps), ("false_negative", fns), ("error", errs)):
+        # mask rows that were not masked (passed through unmasked, or blocked) are mistakes too
+        unmasked = [r for r in rows if r.get("expected") == "mask" and r.get("match") is False]
+        for kind, group in (("false_positive", fps), ("false_negative", fns), ("mask_mismatch", unmasked), ("error", errs)):
             for r in group[:n] if n else group:
-                w.writerow({**r, "kind": kind, "gold_categories": "|".join(r.get("gold_categories") or []),
-                            "categories": "|".join(r.get("categories") or []),
+                w.writerow({**r, "kind": kind, "categories": "|".join(r.get("categories") or []),
                             "blocked_by": "|".join(r.get("blocked_by") or [])})
 
 
@@ -63,8 +63,6 @@ def _header(desc: dict) -> str:
     if task == "model_safety":
         g, j = desc.get("generator") or {}, desc.get("judge") or {}
         return f"- task: `model_safety`  model: `{g.get('model')}` (gen fingerprint `{g.get('fingerprint')}`)  judge: `{j.get('type')}`"
-    if task == "refusal_judge":
-        return f"- task: `refusal_judge`  judge: `{(desc.get('judge') or {}).get('type', desc.get('judge_config', {}).get('type'))}`"
     stages = ", ".join(s.get("name", "?") for s in desc.get("stages", [])) or "-"
     extra = ""
     if desc.get("type") == "guardrail_server":
@@ -92,7 +90,7 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         f"{' (dirty)' if (meta.get('git') or {}).get('dirty') else ''}",
         f"- samples: {metrics['n_scored']}/{metrics['n_total']} scored  "
         f"(error_rate {_fmt(metrics['error_rate'])}, parse_error_rate {_fmt(metrics['parse_error_rate'])}, policy `{metrics['error_policy']}`)",
-        f"- labels: {manifest.get('label_counts')}  languages: {manifest.get('language_counts')}",
+        f"- expected: {manifest.get('expected_counts')}  sources: {manifest.get('source_counts')}  languages: {manifest.get('language_counts')}",
         "",
         "## Overall",
         "",
@@ -123,15 +121,14 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
             if k in ms:
                 lines.append(f"| {k} | {_fmt(ms[k])} |")
         lines += ["", f"label distribution: `{json.dumps(ms.get('label_distribution'), ensure_ascii=False)}`"]
-        if ms.get("refusal_rate_by_category"):
-            lines += ["", "| unsafe category | n | refusal rate |", "|---|---|---|"]
-            lines += [f"| {c} | {v['n']} | {_fmt(v['refusal_rate'])} |" for c, v in ms["refusal_rate_by_category"].items()]
-    if metrics.get("label_confusion"):
-        conf = metrics["label_confusion"]
-        cols = list(next(iter(conf.values())).keys())
-        lines += ["", f"## Judge label confusion (rows = gold, cols = judged; kappa {_fmt(metrics.get('label_kappa'))})", "",
-                  "| gold \\ judged | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
-        lines += [f"| {g} | " + " | ".join(str(row[c]) for c in cols) + " |" for g, row in conf.items()]
+        if ms.get("refusal_rate_by_source"):
+            lines += ["", "| source (block prompts) | n | refusal rate |", "|---|---|---|"]
+            lines += [f"| {c} | {v['n']} | {_fmt(v['refusal_rate'])} |" for c, v in ms["refusal_rate_by_source"].items()]
+    if metrics.get("expected_vs_action"):
+        lines += ["", f"## Expected vs server action (exact match {_fmt(metrics.get('exact_match_rate'))})", "",
+                  "| expected | n | match rate | actions |", "|---|---|---|---|"]
+        lines += [f"| {e} | {v['n']} | {_fmt(v['match_rate'])} | `{json.dumps(v['actions'])}` |"
+                  for e, v in metrics["expected_vs_action"].items()]
     if metrics.get("contamination"):
         c = metrics["contamination"]
         lines += ["", "## Contamination", "",
@@ -149,7 +146,7 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         elif full:
             title = "each stage alone"
         else:
-            title = "each stage alone, over the rows it applies to (apply_to; coverage < 1 = other input types)"
+            title = "each stage alone, over the rows it judged (coverage < 1: the stage skipped some rows)"
         lines += ["", f"## Per stage ({title})", "", "| stage | n | coverage | precision | recall | F1 | FPR | AUROC |",
                   "|---|---|---|---|---|---|---|---|"]
         for st, m in metrics["per_stage"].items():
@@ -158,14 +155,10 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
     for key, groups in metrics.get("slices", {}).items():
         if not groups:
             continue
-        lines += ["", f"## By {key}", ""]
-        if key == "gold_category":
-            lines += ["| category | n | recall |", "|---|---|---|"]
-            lines += [f"| {g} | {m['n']} | {_fmt(m['recall'])} |" for g, m in groups.items()]
-        else:
-            lines += ["| value | n | unsafe/safe | precision | recall | F1 | FPR |", "|---|---|---|---|---|---|---|"]
-            lines += [f"| {g} | {m['n']} | {m['n_unsafe']}/{m['n_safe']} | {_fmt(m['precision'])} | {_fmt(m['recall'])} | "
-                      f"{_fmt(m['f1'])} | {_fmt(m['fpr'])} |" for g, m in groups.items()]
+        lines += ["", f"## By {key}", "", "| value | n | block/other | precision | recall | F1 | FPR |",
+                  "|---|---|---|---|---|---|---|"]
+        lines += [f"| {g} | {m['n']} | {m['n_unsafe']}/{m['n_safe']} | {_fmt(m['precision'])} | {_fmt(m['recall'])} | "
+                  f"{_fmt(m['f1'])} | {_fmt(m['fpr'])} |" for g, m in groups.items()]
     lines += ["", "## Data", ""] + [f"- `{f['path']}` sha256 `{f['sha256'][:12]}` used {f['rows_used']}/{f['rows_in_file']}"
                                     for f in manifest.get("files", [])]
     return "\n".join(lines) + "\n"

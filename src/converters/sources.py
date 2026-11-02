@@ -3,15 +3,16 @@
 Each class implements only ``BaseConverter.records(split)``; combine it with a mapping
 template from ``templates.py`` (put the source first in the bases)::
 
-    class Aegis2(HFDatasetSource, PromptResponseConverter): ...
+    class Aegis2(HFDatasetSource, PromptLabelConverter): ...
 
     HFDatasetSource       load_dataset(hf_id, hf_config, split=split)        the common case
       HFFilesSource       load_dataset(hf_id, data_files=<repo paths>)       per-language dirs, broken viewers
       MultiConfigHFSource one load_dataset per config, rows tagged _config   suites split into configs
     LocalFileSource       options.path: .csv / .jsonl / .json / .parquet    internal / exported data
 
-Sources tag rows with underscore keys (``_config``, ``_<group_key>``) so the mapping can tell
-where a row came from without the source and the mapping knowing about each other.
+Sources only read rows; they know nothing about ``prompt`` / ``expected``. They tag rows with
+underscore keys (``_config``, ``_<group_key>``) so the mapping can tell where a row came from
+(several sets carry the label in the config name) without the two knowing about each other.
 
 ``datasets`` is imported lazily (``pip install .[data]``): the evaluation side and the tests
 never need it. Offline boxes: set ``HF_DATASETS_OFFLINE=1`` and point ``HF_HOME`` at a

@@ -1,6 +1,6 @@
 """One generic plug-in registry used by every extensible part of the project.
 
-    CONVERTERS      src/converters/base.py       dataset -> GuardrailSample
+    CONVERTERS      src/converters/base.py       dataset -> Sample(prompt, expected)
     PARSERS         src/server/backends/parsers.py  guard-model output -> verdict
     BACKENDS        src/server/backends/base.py  guard stage implementations
     PROMPT_BUILDERS src/server/backends/prompts.py  how a guard model is prompted

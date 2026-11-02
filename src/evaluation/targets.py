@@ -23,7 +23,7 @@ import httpx
 
 from ..common import Registry
 from ..config import env, get_by_path, load_config
-from ..data_schema import GuardrailSample
+from .dataset import EvalSample
 from .errors import TargetError
 
 __all__ = ["TARGETS", "Target", "Prediction", "TargetError", "build_target"]
@@ -112,7 +112,7 @@ class Target(abc.ABC):
         return {"type": self.name}
 
     @abc.abstractmethod
-    async def predict(self, s: GuardrailSample) -> Prediction: ...
+    async def predict(self, s: EvalSample) -> Prediction: ...
 
 
 TARGETS: Registry[Target] = Registry("guardrail eval target", base=Target)
@@ -129,9 +129,6 @@ class InProcessTarget(Target):
         from ..server.pipeline import GuardPipeline
 
         tcfg = get_by_path(cfg, "target.inprocess", {})
-        # the production response hook sends only the response texts (no prompt). Default to that so
-        # offline numbers match production; `prompt` gives the guard the user turn (separate experiment).
-        self.response_context = tcfg.get("response_context", "none")
         self.server_cfg = load_config(
             tcfg.get("server_config", ["src/config/server/mock.yaml"]),
             overrides=tcfg.get("overrides", []),
@@ -155,12 +152,8 @@ class InProcessTarget(Target):
                 "server_config_hash": config_hash(self.server_cfg),
                 "server_config": {k: v for k, v in self.server_cfg.items() if k not in ("envs", "meta")}}
 
-    async def predict(self, s: GuardrailSample) -> Prediction:
-        if s.input_type == "response":
-            ctx = [{"role": "user", "content": s.prompt}] if (s.prompt and self.response_context == "prompt") else []
-            inputs = self.pipeline.build_inputs("response", [s.response or ""], ctx)
-        else:
-            inputs = self.pipeline.build_inputs("request", [s.prompt], [{"role": "user", "content": s.prompt}])
+    async def predict(self, s: EvalSample) -> Prediction:
+        inputs = self.pipeline.build_inputs("request", [s.prompt], [{"role": "user", "content": s.prompt}])
         t0 = time.perf_counter()
         res = await self.pipeline.run(inputs, run_all=self.run_all)
         shadow = {st.backend.name for st in self.pipeline.stages if st.shadow}
@@ -224,11 +217,6 @@ class GuardrailServerTarget(_HTTPTarget):
         self.endpoint = self.tcfg.get("endpoint", "classify")
         if self.endpoint not in self.ENDPOINTS:
             raise ValueError(f"target.guardrail_server.endpoint must be one of {self.ENDPOINTS}, got {self.endpoint!r}")
-        # production parity: the response hook receives only the response texts, no prompt
-        self.response_context = self.tcfg.get("response_context", "none")
-        if self.endpoint == "guardrail_api" and self.response_context != "none":
-            raise ValueError("endpoint guardrail_api sends what production sends (no prompt with responses); "
-                             "response_context: prompt needs endpoint: classify")
         self.server_info: dict[str, Any] = {}
         self.server_info_end: dict[str, Any] | None = None
 
@@ -281,7 +269,7 @@ class GuardrailServerTarget(_HTTPTarget):
 
     async def _canary(self) -> None:
         text = self.tcfg.get("canary_text", self.CANARY)
-        pred = await self.predict(GuardrailSample(source="canary", prompt=text, label="unsafe", categories=["prompt_injection"]))
+        pred = await self.predict(EvalSample.build(text, "block", "canary", "canary"))
         if not pred.unsafe:
             raise RuntimeError("canary prompt was NOT blocked by the guardrail server: wrong config, a stage failing "
                                "open, or a disabled pipeline. Refusing to report numbers "
@@ -292,7 +280,7 @@ class GuardrailServerTarget(_HTTPTarget):
         server_stages = info.get("stages", [])
         flt = self.tcfg.get("stages")
         evaluated = [st for st in server_stages if not flt or st.get("name") in flt]  # what this run scored
-        out = {**super().describe(), "endpoint": self.endpoint, "response_context": self.response_context,
+        out = {**super().describe(), "endpoint": self.endpoint,
                "stages": evaluated, "server_stages": server_stages, "stage_filter": flt,
                "server_identity": self.identity(info) if info else None,
                "server_config_hash": info.get("config_hash"), "server_info": info}
@@ -301,28 +289,20 @@ class GuardrailServerTarget(_HTTPTarget):
             out["server_changed_during_run"] = self.server_changed
         return out
 
-    async def predict(self, s: GuardrailSample) -> Prediction:
+    async def predict(self, s: EvalSample) -> Prediction:
         if self.endpoint == "guardrail_api":
             return await self._predict_guardrail_api(s)
-        payload: dict[str, Any] = {"input_type": s.input_type, "run_all": self.tcfg.get("run_all", True),
+        payload: dict[str, Any] = {"input_type": "request", "text": s.prompt, "run_all": self.tcfg.get("run_all", True),
                                    "include_raw": self.save_raw, "stages": self.tcfg.get("stages")}
-        if s.input_type == "response":
-            with_prompt = self.response_context == "prompt"
-            payload.update(text=s.response, prompt=(s.prompt or None) if with_prompt else None)
-        else:
-            payload["text"] = s.prompt
         r, ms = await self._post("/v1/classify", payload)
         self._raise_for_status(r)
         shadow = {st.get("name") for st in (self.server_info or {}).get("stages", []) if st.get("shadow")}
         return _pred_from_pipeline_dict(s.sample_id, r.json(), ms, self.save_raw, self.stage_errors, shadow)
 
-    async def _predict_guardrail_api(self, s: GuardrailSample) -> Prediction:
-        """The production request shape: request rows carry the conversation, response rows only the texts."""
-        if s.input_type == "response":
-            payload = {"input_type": "response", "texts": [s.response or ""], "request_data": {}}
-        else:
-            payload = {"input_type": "request", "texts": [s.prompt], "request_data": {},
-                       "structured_messages": [{"role": "user", "content": s.prompt}]}
+    async def _predict_guardrail_api(self, s: EvalSample) -> Prediction:
+        """The production request shape for a single user prompt."""
+        payload: dict[str, Any] = {"input_type": "request", "texts": [s.prompt], "request_data": {},
+                                   "structured_messages": [{"role": "user", "content": s.prompt}]}
         payload["litellm_call_id"] = f"eval-{s.sample_id}"
         r, ms = await self._post("/beta/litellm_basic_guardrail_api", payload)
         self._raise_for_status(r)

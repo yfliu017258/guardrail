@@ -3,7 +3,7 @@
 A *task* decides which samples it can score, how one sample is predicted, what "positive" means,
 and which extra metrics it reports. The runner, metrics, report and CLI are shared::
 
-    task = TASKS.build(cfg["task"], cfg)          # task.type: guardrail | refusal_judge | model_safety
+    task = TASKS.build(cfg["task"], cfg)          # task.type: guardrail | model_safety
     samples = task.select(samples)
     await task.startup()
     row = await task.predict(sample)              # -> dict with gold_positive / pred_positive / score / ...
@@ -19,7 +19,7 @@ from typing import Any, ClassVar
 
 from ...common import Registry
 from ...config import get_by_path
-from ...data_schema import GuardrailSample
+from ..dataset import EvalSample
 from ..metrics import evaluate_rows
 
 
@@ -47,16 +47,16 @@ class EvalTask(abc.ABC):
         return {"task": self.registry_name, "positive": self.POSITIVE}
 
     # -- per sample ------------------------------------------------------- #
-    def gold(self, sample: GuardrailSample) -> bool:
-        """Ground-truth positive for a sample (default: the sample is unsafe)."""
-        return sample.is_unsafe
+    def gold(self, sample: EvalSample) -> bool:
+        """Ground-truth positive for a sample (default: the server should block it)."""
+        return sample.should_block
 
-    def select(self, samples: list[GuardrailSample]) -> list[GuardrailSample]:
+    def select(self, samples: list[EvalSample]) -> list[EvalSample]:
         """Samples this task can score (default: all)."""
         return samples
 
     @abc.abstractmethod
-    async def predict(self, sample: GuardrailSample) -> dict[str, Any]:
+    async def predict(self, sample: EvalSample) -> dict[str, Any]:
         """Return row fields. Must include ``gold_positive`` (bool) and ``pred_positive`` (bool, or None
         on a non-retryable error together with ``error``). Raise ``TargetError`` for retryable failures."""
 
@@ -71,7 +71,7 @@ class EvalTask(abc.ABC):
             ci=float(get_by_path(c, "metrics.ci", 0.95)),
             seed=int(get_by_path(c, "run.seed", 42)),
             fpr_targets=get_by_path(c, "metrics.fpr_targets", [0.01, 0.05]),
-            slice_by=get_by_path(c, "metrics.slice_by", ["source", "language", "input_type"]),
+            slice_by=get_by_path(c, "metrics.slice_by", ["source", "language"]),
             min_slice_size=int(get_by_path(c, "metrics.min_slice_size", 1)),
             score_stage=get_by_path(c, "metrics.score_stage"),
         )

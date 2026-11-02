@@ -127,7 +127,7 @@ python -m src.server --config src/config/server/mock.yaml --port 8080 &
 python -m src.evaluation --config src/config/evaluation/smoke.yaml
 
 # 正式評測：打正在跑的 server
-python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv --run-name qwen3guard-4b
+python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/ --run-name qwen3guard-4b
 python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api ...   # 走正式 endpoint，只看決策
 ```
 

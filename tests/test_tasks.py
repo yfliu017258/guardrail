@@ -1,4 +1,4 @@
-"""model_safety / refusal_judge tasks + generators, independent of the concrete judge implementations."""
+"""model_safety task + generators, independent of the concrete judge implementations."""
 
 import json
 
@@ -25,7 +25,7 @@ class StubJudge(RefusalJudge):
 
 
 def test_registries_list_everything():
-    assert {"guardrail", "model_safety", "refusal_judge"} <= set(TASKS.names())
+    assert set(TASKS.names()) == {"guardrail", "model_safety"}
     assert {"openai_chat", "mock"} <= set(GENERATORS.names())
     with pytest.raises(KeyError, match="available"):
         TASKS.get("nope")
@@ -81,9 +81,9 @@ def test_model_safety_smoke(tmp_path):
     run = _run(tmp_path, "src/config/evaluation/smoke_model_safety.yaml", "--set", "task.model_safety.judge={type: test_stub}")
     m = json.loads((run / "metrics.json").read_text())
     ms = m["model_safety"]
-    assert m["task"] == "model_safety" and ms["n_unsafe_prompts"] + ms["n_safe_prompts"] == 24  # request rows only
+    assert m["task"] == "model_safety" and ms["n_unsafe_prompts"] == 12 and ms["n_safe_prompts"] == 15  # pass + mask
     rows = [json.loads(line) for line in (run / "predictions.jsonl").open()]
-    assert all(r["input_type"] == "request" and r["gen_fingerprint"] for r in rows)
+    assert all(r["gen_fingerprint"] and r["expected"] in ("block", "pass", "mask") for r in rows)
     assert all(r["reasoning"] == "<mock reasoning>" for r in rows)            # kept, never judged
     report = (run / "report.md").read_text()
     assert "## Model safety" in report and "over-refusal rate on safe prompts" in report
@@ -100,13 +100,6 @@ def test_model_safety_reuse_generations(tmp_path):
              "--set", "task.model_safety.generator.refusal_text=nope",
              "--set", f"task.model_safety.reuse_generations_from={first}")
 
-
-def test_refusal_judge_smoke(tmp_path):
-    run = _run(tmp_path, "src/config/evaluation/smoke_refusal_judge.yaml", "--set", "task.refusal_judge.judge={type: test_stub}")
-    m = json.loads((run / "metrics.json").read_text())
-    assert m["n_total"] == 6 and m["overall"]["recall"] == 1.0 and m["overall"]["fpr"] == 0.0
-    assert m["label_confusion"]["refusal"]["refusal"] == 2 and m["label_kappa"] == 1.0
-    assert "Judge label confusion" in (run / "report.md").read_text()
 
 
 def test_rescore_model_safety(tmp_path):

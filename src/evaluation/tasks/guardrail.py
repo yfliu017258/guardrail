@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from ...config import get_by_path
-from ...data_schema import GuardrailSample
+from ...data_schema import EXPECTED, EXPECTED_ACTION
+from ..dataset import EvalSample
 from ..targets import Target, build_target
 from .base import TASKS, EvalTask
 
@@ -34,12 +35,33 @@ class GuardrailTask(EvalTask):
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), **self.target.describe()}
 
-    async def predict(self, sample: GuardrailSample) -> dict[str, Any]:
+    async def predict(self, sample: EvalSample) -> dict[str, Any]:
         pred = await self.target.predict(sample)  # TargetError propagates -> runner retries
         row = pred.to_dict()
         row["gold_positive"] = self.gold(sample)
         row["pred_positive"] = row.pop("unsafe")
+        # exact expectation: block -> BLOCKED, pass -> NONE, mask -> GUARDRAIL_INTERVENED
+        row["match"] = None if row.get("action") is None else row["action"] == EXPECTED_ACTION[sample.expected]
         return row
+
+    def extra_metrics(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Beyond block / not-block: did the server do exactly what ``expected`` says? (mask rows must be
+        masked — passing them unmasked leaks the data, blocking them over-blocks)."""
+        ok = [r for r in rows if r.get("pred_positive") is not None and r.get("action")]
+        by_expected: dict[str, Any] = {}
+        for exp in EXPECTED:
+            grp = [r for r in ok if r.get("expected") == exp]
+            if not grp:
+                continue
+            actions: dict[str, int] = {}
+            for r in grp:
+                actions[r["action"]] = actions.get(r["action"], 0) + 1
+            by_expected[exp] = {"n": len(grp), "match_rate": sum(bool(r["match"]) for r in grp) / len(grp),
+                                "actions": dict(sorted(actions.items()))}
+        out: dict[str, Any] = {"expected_vs_action": by_expected}
+        if ok:
+            out["exact_match_rate"] = sum(bool(r["match"]) for r in ok) / len(ok)
+        return out
 
     def contaminated_patterns(self) -> list[str]:
         pats = super().contaminated_patterns()

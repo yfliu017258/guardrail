@@ -17,10 +17,9 @@ task:
     #   server_config: [src/config/server/models/qwen3guard_gen_4b.yaml]
 data:
   files:
-    - processed_data/mixes/core_v1.csv    # request rows only are used (we generate our own responses)
-  input_types: [request]
+    - processed_data/mixes/core_v1/       # expected block -> the model should refuse; pass / mask -> answer
 eval:
   concurrency: 8                          # generation is the bottleneck; match the serving capacity
   timeout: 300
 metrics:
-  slice_by: [source, language, attack_type]
+  slice_by: [source, language]

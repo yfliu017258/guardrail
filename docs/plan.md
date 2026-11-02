@@ -20,7 +20,7 @@
 | G1 | 找到適合公司 guardrail 需求的資料集 | `src/converters/*`、`src/config/data.yaml`、固定版本的 eval mix（`core_v1`、`zhtw_v1`） | 每個資料集有 manifest（來源、revision、license、sha256）；zh-TW 有人工審過的子集 |
 | G2 | 找到適合的模型（H200 1g.35gb） | `src/config/server/models/*.yaml`、各模型 eval 結果、leaderboard | 至少 3 個候選在同一 eval mix 上比較 recall@FPR、zh-TW 切片、p95 latency |
 | G3 | 自動、可重現、高品質的 evaluation 程式 | `src/evaluation/*`、`results/<run>/` | 同 config + 同資料 → 同結果；每次 run 都有 config snapshot、資料 hash、git sha、錯誤樣本 |
-| G3b | 裸模型安全基準 | `src/refuse_judge` + `task: model_safety` / `refusal_judge` | Qwen3.6-27B、GLM-5.3-Flash 在同一份 eval mix 上的拒答率、過度拒答率、partial 率；judge 本身在人工標註資料上的 precision/recall 與 κ 有報告 |
+| G3b | 裸模型安全基準 | `src/refuse_judge` + `task: model_safety` | Qwen3.6-27B、GLM-5.3-Flash 在同一份 eval mix 上的拒答率、過度拒答率、partial 率；judge 的判斷經過人工抽查 |
 | G4 | Server 上線就緒 | `src/server` + `deploy/server/`（啟動腳本、Dockerfile）+ `python -m src.server.check` | `check` 全 PASS（決策、`/ready`、auth、延遲）；啟動 config snapshot 與 `/v1/info` 的 `config_hash` 一致；p95 latency 在 MIG 上實測 |
 
 ## 3. 架構
@@ -51,7 +51,7 @@ flowchart LR
 | 週 | 主題 | 具體工作 | 檢查點 |
 |---|---|---|---|
 | W1 | Evaluation 基礎 + baseline | 定 schema / taxonomy；converters（Aegis2、PolyGuard、PI suite、XSTest、NotInject）；凍結 `core_v1`；跑 **現有 SaaS/prompt baseline** | baseline 報告：recall、FPR、zh 切片、latency |
-| W1.5 | 裸模型基準 | 驗證 refusal judge（XSTest-v2 回覆、PolyGuard）；跑 Qwen3.6-27B / GLM-5.3-Flash 的 `model_safety`（thinking 開或關都測） | 模型本身「擋得住多少、誤拒多少」→ 決定 guardrail 需要多嚴 |
+| W1.5 | 裸模型基準 | 跑 Qwen3.6-27B / GLM-5.3-Flash 的 `model_safety`（thinking 開或關都測） | 模型本身「擋得住多少、誤拒多少」→ 決定 guardrail 需要多嚴 |
 | W2 | 模型篩選 | vLLM 部署到 MIG；跑 Qwen3Guard-Gen 0.6B/4B/8B、Nemotron-3.5、Nemotron-8B-v3、Llama-Guard-3（英文參考）、PI classifier | leaderboard + 每個模型 `errors.csv` 人工看 50 筆 |
 | W3 | zh-TW 與公司情境 | OpenCC s2twp 轉換 + 人工審；手寫 300–1000 筆 zh-TW golden set（含「看起來危險但正常」的製程/工程 prompt）；調 threshold；兩階段架構實驗 | `zhtw_v1` 結果；選定 threshold 與架構 |
 | W4 | Server 交付 | 選定 preset 與 threshold；部署 vLLM + server；`src.server.check --load` 壓測 p95；`on_error`（fail-open/closed）策略；shadow 新模型；文件與交接 | 部署好的 server + check 報告 + 評測報告、runbook（`docs/server.md`） |
@@ -64,7 +64,7 @@ flowchart LR
 MIG_UUID=MIG-xxxx MODEL=Qwen/Qwen3Guard-Gen-4B deploy/vllm/serve_guard.sh                   # guard 模型
 GUARD_MODEL_BASE_URL=http://localhost:8000/v1 CONFIG=src/config/server/pipelines/two_stage.yaml deploy/server/run_server.sh
 python -m src.server.check --url http://localhost:8080 --load 200                            # 驗收
-python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv   # 評測
+python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/   # 評測
 ```
 
 換模型 = 用另一個 preset 重啟 server，再跑同一份評測，最後用 `src.evaluation.compare` 比較。

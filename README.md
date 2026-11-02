@@ -10,7 +10,7 @@
   - 輸出 metrics（含 CI、ROC、recall@FPR、每個 stage 的指標）、切片、誤判樣本，以及 config snapshot。
   - 也能評測**裸模型**（Qwen3.6-27B、GLM-5.3-Flash）的拒答行為，和拒答判斷器本身的準確度。
 - **`src/refuse_judge`**：判斷模型回覆是否拒答，有 keyword、llm、qwen3guard_refusal、hf_classifier、cascade、vote 六種。
-- **`src/converters`**：把公開或內部資料集轉成統一的 CSV（`processed_data/`），附 manifest，並能凍結版本化的 eval mix。
+- **`src/converters`**：把公開或內部資料集轉成 **只有 `prompt,expected` 兩欄**的 CSV（`processed_data/<資料集>.csv`；`expected` = `block` / `pass` / `mask`），附 manifest，並能凍結版本化的 eval mix（資料夾，每個來源一個 CSV）。
 
 文件：[`docs/server.md`](docs/server.md)（**server 設定指南**）· [`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
 
@@ -23,12 +23,12 @@ src/
   config/
     config.py            # YAML 合併(_base_) → args → --set；.env → config["envs"]；dump 時只記錄 env 名稱、遮蔽 secrets
     server/              # default.yaml, mock.yaml, models/*.yaml（各 guard 模型 preset）, pipelines/, policies/
-    evaluation/          # default / smoke / model_safety / refusal_judge (+ smoke_*) .yaml
+    evaluation/          # default / smoke / model_safety / smoke_model_safety .yaml
     models/              # 裸模型 generator preset：qwen3_6_27b.yaml, glm_5_3_flash.yaml
     refuse_judge/        # keyword / llm_judge / qwen3guard / cascade .yaml
     data.yaml            # converters + 固定 eval mix
   common/registry.py     # 共用 Registry（register / get / build / describe, lazy plug-ins）
-  data_schema/           # GuardrailSample（CSV 格式唯一定義處，含 refusal_label）、taxonomy 對照表、語言偵測
+  data_schema/           # Sample(prompt, expected)：CSV 格式唯一定義處；taxonomy 對照表；語言偵測
   converters/            # base.py（BaseConverter + CONVERTERS）, sources.py, templates.py, datasets/*.py, mix.py
   server/                # app.py, pipeline.py, schemas.py, check.py（驗收）, testing.py（背景 server）,
                          # backends/{base,regex,hf_classifier,openai_guard,prompts,parsers,mock}.py
@@ -36,7 +36,7 @@ src/
   refuse_judge/          # base.py（RefusalJudge + REFUSAL_JUDGES）, keyword / llm / guard / classifier / ensemble, __main__.py
 deploy/server/             # run_server.sh, Dockerfile
 deploy/vllm/serve_guard.sh # 在 MIG slice 上啟動 guard 模型（vLLM）
-processed_data/samples/smoke.csv   # 30 筆中英小樣本（測試/CI）
+processed_data/samples/smoke.csv   # 27 筆中英小樣本（prompt,expected；測試/CI）
 tests/                             # 不需 GPU / 網路；整合測試會自己起一個真的 server（mock backend）
 ```
 
@@ -65,11 +65,10 @@ GUARD_MODEL_BASE_URL=http://localhost:8000/v1 CONFIG=src/config/server/models/qw
 python -m src.server.check --url http://localhost:8080 --load 200     # 驗收：決策、/ready、延遲
 
 # 4) 評測：直接打 server
-python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv --run-name qwen3guard-4b
+python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/ --run-name qwen3guard-4b
 python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api --data ...    # 走正式 endpoint
 
-# 4b) 裸模型安全：先驗證 refusal judge，再評測模型（見 docs/model_safety.md）
-python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
+# 4b) 裸模型安全（見 docs/model_safety.md）
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
 python -m src.evaluation --list                                                        # 所有 task / target / generator / judge
 
@@ -101,5 +100,5 @@ python -m src.evaluation \
 | `target.json` | 被評測的 pipeline（各 stage、模型、threshold、server config） |
 | `predictions.jsonl` | 逐筆結果（含 per-stage 分數、延遲、raw 輸出），可 `--resume` |
 | `metrics.json` / `report.md` | precision/recall/F1/FPR（含 bootstrap 95% CI）、AUROC/AUPRC、best-F1 threshold、recall@FPR、per-stage、切片、latency |
-| `slices.csv` | 依 source / language / input_type / attack_type 的指標 |
+| `slices.csv` | 依 source（檔名）/ language（偵測）的指標 |
 | `errors.csv` | **最有把握的誤擋 / 漏擋**，人工分析用 |

@@ -4,32 +4,28 @@
 > 對有害 prompt 會不會拒答？對正常但「看起來危險」的 prompt 會不會過度拒答？
 > 這是 guardrail 設計的基準：模型本身越安全，guardrail 可以越寬鬆（FPR 越低）。
 
-## 1. 三個評測 task（`src/evaluation/tasks`，registry: `TASKS`）
+## 1. 兩個評測 task（`src/evaluation/tasks`，registry: `TASKS`）
 
 | task | 問題 | positive | recall 的意義 | FPR 的意義 |
 |---|---|---|---|---|
-| `guardrail` | guardrail 擋得對嗎？ | unsafe → blocked | 有害內容攔截率 | 正常內容誤擋率 |
-| `model_safety` | 裸模型會拒答有害 prompt 嗎？ | unsafe prompt → refused | **拒答率**（= 1 − ASR） | **過度拒答率** |
-| `refusal_judge` | 拒答判斷器本身準嗎？ | 人工標註為拒答 | 拒答被抓到的比例 | 正常回答被誤判成拒答 |
+| `guardrail` | guardrail server 擋得對嗎？ | `expected: block` → blocked | 有害內容攔截率 | 正常內容（pass / mask）誤擋率 |
+| `model_safety` | 裸模型會拒答有害 prompt 嗎？ | `expected: block` → refused | **拒答率**（= 1 − ASR） | **過度拒答率**（pass / mask prompt 被拒） |
 
-**順序很重要：先跑 `refusal_judge`，確認 judge 可靠，再跑 `model_safety`。** judge 的誤差會原封不動進入每個 `model_safety` 數字。
+資料同一份：`prompt,expected`。`model_safety` 把 `block` 當成「應該拒答」，`pass` 和 `mask` 當成「應該回答」。
+
+**judge 的誤差會原封不動進入每個 `model_safety` 數字**。資料只有 `prompt,expected`、沒有人工標註的回覆，所以 judge 沒辦法用資料集自動驗證：上線前請人工抽查 `predictions.jsonl` 中 judge 的判斷（尤其是 `cascade` 交給 LLM 的那些）。
 
 ```bash
-# 1) 驗證 judge（XSTest-v2 五個模型 × 450 筆人工標註，含 partial）
-python -m src.converters --dataset xstest_responses polyguard_prompts
-python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml \
-    --set task.refusal_judge.judge_config=src/config/refuse_judge/cascade.yaml
-
-# 2) 裸模型
+# 1) 裸模型
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/glm_5_3_flash.yaml
 
-# 3) 換 judge 重判，不重新生成（generation 最貴）
+# 2) 換 judge 重判，不重新生成（generation 最貴）
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml \
     --set task.model_safety.reuse_generations_from=results/<上一個 run> \
     --set task.model_safety.judge_config=src/config/refuse_judge/llm_judge.yaml
 
-# 4) 比較
+# 3) 比較
 python -m src.evaluation.compare results/*model-safety*/ results/*qwen3.6*/ results/*glm*/ --sort recall
 ```
 
@@ -64,8 +60,8 @@ flowchart LR
 **keyword judge 是啟發式方法，有已知誤判**：例如 "I can't explain how excited I am…" 會被判成拒答；第一人稱的教學句「我們不能直接寫…」也會被當成完整拒答。所以：
 
 - 預設用 `cascade`（keyword → llm）。沒有拒答詞、也沒有照做開頭的短回覆，會拿到 0.35 左右的不確定分數，交給 LLM 判斷（可用 `uncertain_score` 調整）。
-- `hi` / `lo` threshold 要用 `refusal_judge` task 在人工標註資料上校準，不要直接沿用預設值。
-- `llm_judge.yaml` 的 model 是 placeholder（`REPLACE-WITH-JUDGE-ALIAS`），沒設定時會拒絕啟動。設定方式：`--set task.model_safety.judge.then.model=<alias>`（也可用 `refusal_judge`）。
+- `hi` / `lo` threshold 是猜的：人工抽查一批判斷後再調整，不要直接沿用預設值。
+- `llm_judge.yaml` 的 model 是 placeholder（`REPLACE-WITH-JUDGE-ALIAS`），沒設定時會拒絕啟動。設定方式：`--set task.model_safety.judge.then.model=<alias>`。
 
 三分類定義（與 XSTest / WildGuard 一致）：
 
