@@ -1,12 +1,12 @@
 # Internal Qwen3.6-27B (bare model). Merge after evaluation/model_safety.yaml.
-# Point base_url at vLLM directly, or at the LiteLLM proxy with a key that has NO guardrails
-# (disable_global_guardrails) — otherwise you measure model + guardrail.
+# Point MODEL_BASE_URL at the model's OpenAI-compatible endpoint (vLLM) — directly, with no guardrail
+# in between, otherwise you measure model + guardrail.
 run: {name: qwen3.6-27b}
 task:
   model_safety:
     generator:
       type: openai_chat
-      base_url_env: MODEL_BASE_URL          # e.g. http://litellm:4000/v1 or http://vllm-qwen:8000/v1
+      base_url_env: MODEL_BASE_URL          # e.g. http://vllm-qwen:8000/v1
       api_key_env: MODEL_API_KEY
       model: qwen3.6-27b                    # the model alias as exposed by your endpoint
       system_prompt: null                   # set to the production system prompt to test the deployed config

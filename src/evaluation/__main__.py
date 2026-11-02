@@ -9,9 +9,10 @@ Tasks (``task.type``, registry ``TASKS``):
     python -m src.evaluation --config src/config/evaluation/smoke.yaml
     python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml
 
-    # guardrail: a guard model in-process against processed datasets
-    python -m src.evaluation --server-config src/config/server/models/qwen3guard_gen_4b.yaml \
-        --data processed_data/mixes/core_v1.csv --run-name qwen3guard4b
+    # guardrail: evaluate a RUNNING guardrail server (python -m src.server --config ...)
+    python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv \
+        --run-name qwen3guard4b
+    python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api ...   # production endpoint
 
     # bare model: Qwen3.6-27B with a cascade refusal judge
     python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
@@ -55,6 +56,8 @@ ARG_TO_KEY = {
     "task": "task.type",
     "target": "target.type",
     "server_config": "target.inprocess.server_config",
+    "server_url": "target.guardrail_server.base_url",
+    "endpoint": "target.guardrail_server.endpoint",
     "concurrency": "eval.concurrency",
     "limit": "eval.limit",
     "threshold": "metrics.threshold",
@@ -79,6 +82,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=None, help="total cap after merging files")
     p.add_argument("--task", default=None, choices=TASKS.names())
     p.add_argument("--target", default=None, choices=TARGETS.names(), help="guardrail task only")
+    p.add_argument("--server-url", default=None, help="guardrail server base URL (guardrail_server target)")
+    p.add_argument("--endpoint", default=None, choices=["classify", "guardrail_api"],
+                   help="guardrail_server: /v1/classify (per-stage detail) or the production endpoint")
     p.add_argument("--server-config", nargs="+", default=None, help="server YAML(s) for the inprocess target")
     p.add_argument("--concurrency", type=int, default=None)
     p.add_argument("--threshold", type=float, default=None, help="re-threshold the score")
@@ -116,6 +122,14 @@ def _write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(redact(obj), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
+#: describe() keys that legitimately differ between the start of a run and a resume of it
+_VOLATILE_DESC_KEYS = ("server_info", "server_info_end", "server_changed_during_run")
+
+
+def _stable(desc: dict) -> dict:
+    return {k: v for k, v in desc.items() if k not in _VOLATILE_DESC_KEYS}
+
+
 def _check_resume(run_dir: Path, manifest: dict, desc: dict, force: bool) -> None:
     """A resumed run must use the data and task settings of the original one, or the run mixes two configs."""
     problems = []
@@ -129,7 +143,8 @@ def _check_resume(run_dir: Path, manifest: dict, desc: dict, force: bool) -> Non
     if old_t is not None:
         from ..config import redact
 
-        if config_hash(json.loads(old_t.read_text(encoding="utf-8"))) != config_hash(json.loads(json.dumps(redact(desc), default=str))):
+        old_desc = _stable(json.loads(old_t.read_text(encoding="utf-8")))
+        if config_hash(old_desc) != config_hash(_stable(json.loads(json.dumps(redact(desc), default=str)))):
             problems.append(f"task/target settings differ from {old_t.name} (e.g. an edited server preset)")
     if problems and not force:
         raise SystemExit("refusing to --resume: " + "; ".join(problems) + ". Start a new run, or pass --force.")
@@ -141,17 +156,28 @@ async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = Fal
     n_before = len(samples)
     samples = task.select(samples)
     manifest["task_selected"] = {"task": task.registry_name, "kept": len(samples), "dropped": n_before - len(samples)}
-    desc = task.describe()
-    if resume:
-        _check_resume(run_dir, manifest, desc, force)
-    _write_json(run_dir / "data_manifest.json", manifest)
-    await task.startup()
     try:
+        await task.startup()  # before describe(): a server target only knows what it evaluates once connected
+    except BaseException:
+        await task.shutdown()  # release what startup opened (HTTP clients, models) before reporting the failure
+        raise
+    try:
+        desc = task.describe()
+        if resume:
+            _check_resume(run_dir, manifest, desc, force)
+        _write_json(run_dir / "data_manifest.json", manifest)
         _write_json(run_dir / "task.json", desc)
         rows = await run_predictions(task, samples, cfg, run_dir / "predictions.jsonl")
     finally:
         await task.shutdown()
+    desc = task.describe()  # again: targets add what they observed at the end (e.g. the server's config hash)
+    _write_json(run_dir / "task.json", desc)
     metrics = compute_metrics(task, rows)
+    if desc.get("server_changed_during_run"):
+        msg = ("the guardrail server's config_hash changed during the run (restarted with other settings?): "
+               "predictions mix two configurations")
+        log.error(msg)
+        metrics.setdefault("warnings", []).append(msg)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
     o = metrics["overall"]
     log.info("done [%s]: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", task.registry_name, o["n"], o["precision"],

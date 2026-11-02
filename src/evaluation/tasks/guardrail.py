@@ -12,7 +12,7 @@ from .base import TASKS, EvalTask
 
 @TASKS.register("guardrail")
 class GuardrailTask(EvalTask):
-    """Evaluate a guardrail target (``target.type``: inprocess / guardrail_server / litellm_*)."""
+    """Evaluate a guardrail (``target.type``: guardrail_server = a running server, or inprocess)."""
 
     POSITIVE = "unsafe"
     METRIC_LABELS = {
@@ -44,7 +44,9 @@ class GuardrailTask(EvalTask):
     def contaminated_patterns(self) -> list[str]:
         pats = super().contaminated_patterns()
         desc = self.target.describe()
-        for st in get_by_path(desc, "server_config.pipeline.stages", []) or []:
+        # inprocess: the server YAML; guardrail_server: the stages reported by GET /v1/info
+        stages = (get_by_path(desc, "server_config.pipeline.stages", []) or []) + (desc.get("stages") or [])
+        for st in stages:
             if st.get("enabled", True):
                 pats += st.get("trained_on") or []
         return sorted(set(pats))

@@ -1,16 +1,20 @@
-# OJT — LiteLLM Guardrail：服務與可重現評測
+# OJT — Guardrail Server：服務與可重現評測
 
-為內部 LiteLLM proxy（v1.92.0）設計 input/output guardrail 的 OJT 專案參考實作：
+本專案的目標是**設定好 guardrail server**，並用可重現的方式評測它。所有測試與評測都直接打 server。
 
-- **`src/server`**：FastAPI + uvicorn 的 guardrail 服務，實作 LiteLLM 內建 `generic_guardrail_api` 的協定；多 stage pipeline，依序為 regex 規則、輕量 classifier、vLLM 上的 LLM guard。
-- **`src/refuse_judge`**：判斷模型回覆是否拒答（keyword / LLM / Qwen3Guard / classifier / cascade / vote），用於**裸模型**安全評測（Qwen3.6-27B、GLM-5.3-Flash）。
-- **`src/evaluation`**：自動、可重現的評測 CLI。可評測 in-process pipeline、guardrail 服務，或真正的 LiteLLM proxy。輸出 metrics（含 CI、ROC、recall@FPR）、切片、錯誤樣本，以及 config snapshot。
-- **`src/litellm_admin`**：沒有 proxy config file 權限時，透過 LiteLLM admin API 以宣告式方式管理 guardrail（plan / apply / attach / test），每次變更都留 audit。
-- **`src/converters`**：把公開或內部資料集轉成統一 CSV（`processed_data/`），附 manifest，並能凍結版本化的 eval mix。
+- **`src/server`**：FastAPI + uvicorn 的 guardrail server，採 generic guardrail API（`POST /beta/litellm_basic_guardrail_api`）。
+  - pipeline 依序是 regex 規則 → 輕量 classifier → vLLM 上的 LLM guard。
+  - 也提供 `/v1/classify`（每個 stage 的細節）、`/health`、`/ready`、`/v1/info`。
+  - 驗收工具：`python -m src.server.check`。
+- **`src/evaluation`**：自動、可重現的評測 CLI，預設直接打正在跑的 server。
+  - 輸出 metrics（含 CI、ROC、recall@FPR、每個 stage 的指標）、切片、誤判樣本，以及 config snapshot。
+  - 也能評測**裸模型**（Qwen3.6-27B、GLM-5.3-Flash）的拒答行為，和拒答判斷器本身的準確度。
+- **`src/refuse_judge`**：判斷模型回覆是否拒答，有 keyword、llm、qwen3guard_refusal、hf_classifier、cascade、vote 六種。
+- **`src/converters`**：把公開或內部資料集轉成統一的 CSV（`processed_data/`），附 manifest，並能凍結版本化的 eval mix。
 
-計劃、調查與設計：[`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
+文件：[`docs/server.md`](docs/server.md)（**server 設定指南**）· [`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
 
-所有可擴充元件（converters、guard backends / parsers / prompt builders、evaluation tasks / targets / generators、refusal judges）都是註冊在同一個 `Registry` 的類別，新增功能 = 寫一個 subclass + 一行 `@REG.register("name")`。
+所有可擴充元件（converters、guard backends / parsers / prompt builders、evaluation tasks / targets / generators、refusal judges）都是註冊在同一個 `Registry` 的類別。新增功能 = 寫一個 subclass + 一行 `@REG.register("name")`。
 
 ## 目錄
 
@@ -26,15 +30,14 @@ src/
   common/registry.py     # 共用 Registry（register / get / build / describe, lazy plug-ins）
   data_schema/           # GuardrailSample（CSV 格式唯一定義處，含 refusal_label）、taxonomy 對照表、語言偵測
   converters/            # base.py（BaseConverter + CONVERTERS）, sources.py, templates.py, datasets/*.py, mix.py
-  server/                # app.py, pipeline.py, schemas.py, backends/{base,regex,hf_classifier,openai_guard,prompts,parsers,mock}.py
+  server/                # app.py, pipeline.py, schemas.py, check.py（驗收）, testing.py（背景 server）,
+                         # backends/{base,regex,hf_classifier,openai_guard,prompts,parsers,mock}.py
   evaluation/            # tasks/{base,guardrail,refusal}.py, targets.py, generation.py, runner.py, metrics.py, report.py, compare.py
   refuse_judge/          # base.py（RefusalJudge + REFUSAL_JUDGES）, keyword / llm / guard / classifier / ensemble, __main__.py
-  litellm_admin/         # client.py（admin API）, __main__.py（list/plan/apply/delete/attach/test/export）
-deploy/litellm/guardrails.yaml     # 期望的 guardrails（admin API 用，進 git 版控）
-deploy/litellm/proxy_config.yaml   # config-file 寫法參考（本專案不需要改）
-deploy/vllm/serve_guard.sh         # 在 MIG slice 上啟動 vLLM
+deploy/server/             # run_server.sh, Dockerfile
+deploy/vllm/serve_guard.sh # 在 MIG slice 上啟動 guard 模型（vLLM）
 processed_data/samples/smoke.csv   # 30 筆中英小樣本（測試/CI）
-tests/                             # 516 個測試，不需 GPU / 網路
+tests/                             # 不需 GPU / 網路；整合測試會自己起一個真的 server（mock backend）
 ```
 
 ## 快速開始
@@ -46,7 +49,9 @@ cp .env.example .env
 
 pytest -q                             # 全部離線可跑
 
-# 1) 不需 GPU 的端到端 smoke（mock backend）
+# 1) 不需 GPU：mock server + 冒煙評測（打 server）
+python -m src.server --config src/config/server/mock.yaml --port 8080 &
+python -m src.server.check --url http://localhost:8080
 python -m src.evaluation --config src/config/evaluation/smoke.yaml
 
 # 2) 資料
@@ -54,28 +59,22 @@ python -m src.converters --list
 python -m src.converters --config src/config/data.yaml                 # 或 --dataset aegis2 xstest
 python -m src.converters.mix --config src/config/data.yaml --only core_v1
 
-# 3) 模型（MIG 上）
+# 3) guard 模型（MIG 上）+ server
 MIG_UUID=MIG-xxxx MODEL=Qwen/Qwen3Guard-Gen-4B deploy/vllm/serve_guard.sh
+GUARD_MODEL_BASE_URL=http://localhost:8000/v1 CONFIG=src/config/server/models/qwen3guard_gen_4b.yaml deploy/server/run_server.sh
+python -m src.server.check --url http://localhost:8080 --load 200     # 驗收：決策、/ready、延遲
 
-# 4) 評測：in-process（最快的迭代迴圈）
-python -m src.evaluation --server-config src/config/server/models/qwen3guard_gen_4b.yaml \
-    --data processed_data/mixes/core_v1.csv --run-name qwen3guard-4b
+# 4) 評測：直接打 server
+python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1.csv --run-name qwen3guard-4b
+python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api --data ...    # 走正式 endpoint
 
 # 4b) 裸模型安全：先驗證 refusal judge，再評測模型（見 docs/model_safety.md）
 python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
-python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml       # 不需 GPU 的冒煙測試
 python -m src.evaluation --list                                                        # 所有 task / target / generator / judge
 
-# 5) 比較
+# 5) 比較（換模型 = 用另一個 preset 重啟 server，再評測一次）
 python -m src.evaluation.compare results/*/ --sort f1 -o results/leaderboard.md
-
-# 6) 服務 + 透過 admin API 註冊到 LiteLLM（不需改 proxy config）
-python -m src.server --config src/config/server/pipelines/two_stage.yaml
-python -m src.litellm_admin plan && python -m src.litellm_admin apply --yes
-python -m src.litellm_admin test ojt-guard-pre
-python -m src.litellm_admin attach --team <pilot_team_id> --guardrails ojt-guard-pre ojt-guard-post --yes
-python -m src.evaluation --target litellm_apply_guardrail --data processed_data/mixes/core_v1.csv
 ```
 
 ## Config 規則

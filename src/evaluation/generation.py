@@ -34,7 +34,7 @@ class Generation:
     text: str                              # user-visible answer (reasoning removed)
     reasoning: str | None = None           # thinking tokens, if any (never judged)
     finish_reason: str | None = None
-    blocked: bool = False                  # rejected by a guardrail in front of the model (proxy path)
+    blocked: bool = False                  # rejected by a gateway / guardrail in front of the model
     block_message: str | None = None
     latency_ms: float = 0.0
     usage: dict[str, Any] = field(default_factory=dict)
@@ -92,11 +92,11 @@ def split_reasoning(content: str, reasoning: str | None) -> tuple[str, str | Non
 
 @GENERATORS.register("openai_chat")
 class OpenAIChatGenerator(Generator):
-    """Any OpenAI-compatible chat endpoint: vLLM directly, or the LiteLLM proxy.
+    """Any OpenAI-compatible chat endpoint (the model's vLLM server).
 
-    For a *bare-model* eval call vLLM directly, or use a proxy key with ``disable_global_guardrails``
-    — otherwise you measure model + guardrail. That system-level number is useful too: a guardrail
-    block is recorded as ``blocked`` and (by default) counted as a refusal.
+    Call the model directly for a *bare-model* eval. If a gateway in front of it rejects a request
+    (HTTP 400 whose body matches ``blocked_markers``), the row is recorded as ``blocked`` and, by
+    default, counted as a refusal.
     """
 
     FINGERPRINT_KEYS = ("type", "model", "system_prompt", "temperature", "top_p", "max_tokens", "seed", "extra_body")

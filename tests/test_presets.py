@@ -101,3 +101,12 @@ def test_preset_bounds_long_inputs_to_the_served_context(path):
             sent = json.dumps(payload.get("messages") or payload.get("prompt"), ensure_ascii=False)
             assert _cjk(sent) + payload["max_tokens"] < 8192, path
             assert "並在捷運站引爆" in sent, path  # the tail of the judged turn survives truncation
+
+
+def test_guard_model_url_from_env_overrides_the_preset_default():
+    cfg = load_config(["src/config/server/models/qwen3guard_gen_4b.yaml"], env_file=None)
+    assert GuardPipeline(cfg).stages[0].backend.base_url == "http://localhost:8000/v1"
+    cfg["envs"] = {"GUARD_MODEL_BASE_URL": "http://user:pw@vllm-guard.internal:8000/v1/"}
+    be = GuardPipeline(cfg).stages[0].backend
+    assert be.base_url == "http://user:pw@vllm-guard.internal:8000/v1"
+    assert "pw" not in be.describe()["base_url"]          # /v1/info never exposes credentials

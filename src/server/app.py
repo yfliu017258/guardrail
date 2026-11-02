@@ -12,10 +12,12 @@ import hmac
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 
 from ..config import env, get_by_path
 from .pipeline import ACTION_BLOCKED, GuardPipeline, PipelineResult
@@ -84,12 +86,25 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
 
     @app.get("/health")
     async def health() -> dict[str, str]:
+        """Liveness: the process is up and the pipeline started (lifespan finished)."""
         return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        """Readiness: every live stage can answer (e.g. the guard model's vLLM serves the configured model).
+        503 when a stage is down — a fail_open stage being down still means traffic passes UNCHECKED by it."""
+        res = await pipeline.ready()
+        return JSONResponse(res, status_code=200 if res["ready"] else 503)
+
+    meta = cfg.get("meta", {})
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     @app.get("/v1/info", dependencies=[Depends(auth)])
     async def info() -> dict[str, Any]:
+        """What this server is: evaluations record it, and compare it before/after a run."""
         return {"stages": pipeline.describe(), "strategy": pipeline.strategy, "request_scope": pipeline.request_scope,
-                "config_hash": cfg.get("meta", {}).get("config_hash")}
+                "config_hash": meta.get("config_hash"), "config_sources": meta.get("config_sources"),
+                "git": meta.get("git"), "started_at": started_at, "version": app.version}
 
     @app.get("/v1/stats", dependencies=[Depends(auth)])
     async def get_stats() -> dict[str, int]:

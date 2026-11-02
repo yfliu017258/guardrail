@@ -66,7 +66,10 @@ def _header(desc: dict) -> str:
     if task == "refusal_judge":
         return f"- task: `refusal_judge`  judge: `{(desc.get('judge') or {}).get('type', desc.get('judge_config', {}).get('type'))}`"
     stages = ", ".join(s.get("name", "?") for s in desc.get("stages", [])) or "-"
-    return f"- task: `guardrail`  target: `{desc.get('type')}`  stages: {stages}"
+    extra = ""
+    if desc.get("type") == "guardrail_server":
+        extra = f"  url: `{desc.get('base_url')}` endpoint: `{desc.get('endpoint')}` server config_hash: `{desc.get('server_config_hash')}`"
+    return f"- task: `guardrail`  target: `{desc.get('type')}`  stages: {stages}{extra}"
 
 
 def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict[str, Any], target_desc: dict) -> str:
@@ -84,6 +87,7 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
         f"# Eval [{metrics.get('task', 'guardrail')}] — {cfg.get('run', {}).get('name', 'run')}",
         "",
         _header(target_desc),
+        *[f"- ⚠ WARNING: {w}" for w in metrics.get("warnings", [])],
         f"- config_hash: `{meta.get('config_hash', '-')}`  git: `{(meta.get('git') or {}).get('commit', '-')}`"
         f"{' (dirty)' if (meta.get('git') or {}).get('dirty') else ''}",
         f"- samples: {metrics['n_scored']}/{metrics['n_total']} scored  "

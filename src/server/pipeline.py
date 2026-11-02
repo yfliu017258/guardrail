@@ -78,7 +78,7 @@ class GuardPipeline:
         pcfg = cfg.get("pipeline", {})
         self.strategy = pcfg.get("strategy", "sequential")  # sequential (short-circuit) | parallel
         self.request_scope = pcfg.get("request_scope", "last_user")  # last_user | all_user | all_texts
-        # client system / developer messages are client-written on a shared proxy: judge them too
+        # system / developer messages are written by the client, not by us: judge them too
         self.judge_system_messages = bool(pcfg.get("judge_system_messages", True))
         # tool results / assistant text / tool calls after the newest user turn (indirect prompt injection)
         self.judge_tool_messages = bool(pcfg.get("judge_tool_messages", True))
@@ -118,6 +118,21 @@ class GuardPipeline:
 
     async def startup(self) -> None:
         await asyncio.gather(*(s.backend.startup() for s in self.stages))
+
+    async def ready(self) -> dict[str, Any]:
+        """Per-stage readiness. Not ready if a live stage is down, unless that stage fails open
+        (then the server answers, just without that stage) — reported as ``degraded``."""
+        checks = await asyncio.gather(*(s.backend.ready() for s in self.stages), return_exceptions=True)
+        stages, ready, degraded = {}, True, False
+        for st, res in zip(self.stages, checks):
+            ok, detail = (False, f"{type(res).__name__}: {res}") if isinstance(res, BaseException) else res
+            stages[st.backend.name] = {"ready": ok, "detail": detail, "on_error": st.on_error, "shadow": st.shadow}
+            if not ok and not st.shadow:
+                if st.on_error == "fail_open":
+                    degraded = True
+                else:
+                    ready = False
+        return {"ready": ready and not degraded, "degraded": degraded, "stages": stages}
 
     async def shutdown(self) -> None:
         await self.drain_shadow(self.shadow_drain_timeout)  # before their clients are closed

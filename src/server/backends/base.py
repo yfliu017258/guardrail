@@ -97,6 +97,11 @@ class GuardBackend(abc.ABC):
     async def startup(self) -> None:  # load weights / open clients
         return None
 
+    async def ready(self) -> tuple[bool, str]:
+        """Readiness for ``GET /ready``: can this stage answer right now? (``/health`` only says the process
+        is up.) Backends with a remote dependency override this; local ones are ready once started."""
+        return True, "ok"
+
     async def shutdown(self) -> None:
         return None
 
@@ -128,7 +133,10 @@ class GuardBackend(abc.ABC):
         return self.registry_name
 
     def describe(self) -> dict[str, Any]:
-        return {"name": self.name, "type": self.registry_name, "threshold": self.threshold}
+        out = {"name": self.name, "type": self.registry_name, "threshold": self.threshold}
+        if self.cfg.get("trained_on"):  # training-data families: evaluation excludes them from "clean" metrics
+            out["trained_on"] = list(self.cfg["trained_on"])
+        return out
 
 
 #: Not backend failures: shutdown, Ctrl-C and task cancellation (request timeouts) must propagate.

@@ -1,50 +1,28 @@
 # 架構與設計決定
 
-## 1. LiteLLM 1.92.0 串接契約（已對照原始碼）
+## 1. Server API 契約
 
-來源：`litellm/proxy/guardrails/guardrail_hooks/generic_guardrail_api/generic_guardrail_api.py`、
-`litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`、
-`litellm/llms/openai/chat/guardrail_translation/handler.py`。
+server 採 generic guardrail API 協定。呼叫端（gateway）照這個格式呼叫即可，**呼叫端怎麼設定不在本專案範圍內**。欄位格式來自 LiteLLM 1.92.0 的 `generic_guardrail_api`，已對照原始碼。
 
 | 項目 | 行為 |
 |---|---|
-| Endpoint | `POST {api_base}/beta/litellm_basic_guardrail_api`（路徑自動補上） |
-| Auth | `litellm_params.api_key` → header `x-api-key` |
-| Request（pre_call） | `texts` = **所有 message 的文字**（含 system / 歷史，除非 `skip_system_message_in_guardrail: true`）；`structured_messages` = 完整對話；`request_data` = user_api_key_* metadata；`request_headers`（已過濾）；`litellm_call_id`、`model`、`tools` |
-| Request（post_call） | `texts` = 模型輸出的各 choice 文字；**沒有 prompt 上下文** |
-| Response | `{"action": "NONE"}` 放行；`{"action": "BLOCKED", "blocked_reason": "..."}` → proxy 拋 `GuardrailRaisedException`（client 收到錯誤）；`{"action": "GUARDRAIL_INTERVENED", "texts": [...]}` → 依序替換文字（遮罩） |
-| 錯誤處理 | `unreachable_fallback: fail_open|fail_closed`（連不上 / 502/503/504）；`fail_on_error: false` → 任何錯誤都放行 |
-| Streaming | 預設每 `streaming_sampling_rate`（5）個 chunk 檢查一次；`streaming_end_of_stream_only: true` 只在結尾檢查。**streaming 時只有 BLOCKED 有效，`GUARDRAIL_INTERVENED` 的遮罩不會套用**（1.92 會原樣送出 chunk），所以 streaming 的部署要在 regex stage 設 `response_mask_action: block`；短於取樣間隔的回覆在擋下之前就已送達。`streaming_buffer_until_moderated` 不會傳給 `generic_guardrail_api` |
-| 測試端點 | `POST /guardrails/apply_guardrail {guardrail_name, text, input_type}` → 不呼叫 LLM 直接跑 guardrail（evaluation 的 `litellm_apply_guardrail` target） |
+| Endpoint | `POST /beta/litellm_basic_guardrail_api` |
+| Auth | header `x-api-key`（或 `Authorization: Bearer`），值等於 server 的 `GUARDRAIL_API_KEY` |
+| Request（`input_type: request`） | `texts`：要判斷的所有訊息文字；`structured_messages`：完整對話；可選 `tool_calls`、`litellm_call_id`、`request_data` |
+| Request（`input_type: response`） | `texts`：模型輸出的各 choice 文字。**通常沒有 prompt 上下文**，評測預設 `response_context: none` 和這個情況一致 |
+| Response | `{"action": "NONE"}` 放行；`{"action": "BLOCKED", "blocked_reason": "..."}`；`{"action": "GUARDRAIL_INTERVENED", "texts": [...]}` 依位置替換（遮罩） |
+| Streaming 的呼叫端 | 通常只能對 BLOCKED 做出反應，無法套用遮罩，所以 streaming 的部署要在 regex stage 設 `response_mask_action: block` |
+| 其他 endpoint | `/v1/classify`（每個 stage 的細節）、`/health`、`/ready`、`/v1/info`、`/v1/stats`，見 `docs/server.md` |
 
-## 1.1 Admin API（不改 config file 時的管理方式）
+## 2. 為什麼是獨立的 guard 服務
 
-| Endpoint（PROXY_ADMIN） | 用途 | 備註 |
-|---|---|---|
-| `GET /v2/guardrails/list` | DB + 記憶體中的 guardrails | `api_key` 會遮罩 → 無法 diff，`--force` 可強制重送 |
-| `POST /guardrails` `{"guardrail": {...}}` | 建立 | 立即在該 pod 初始化；設定錯誤會 rollback 回 400 |
-| `PUT /guardrails/{id}` | 整筆取代 | `src.litellm_admin apply` 使用 |
-| `PATCH /guardrails/{id}` | 合併 litellm_params | |
-| `DELETE /guardrails/{id}` | 刪除 | 其他 pod 在下次 DB 同步時移除 |
-| `POST /team/update` / `POST /key/update` `{"guardrails": [...]}` | 掛到 team / key | **整個取代**清單 |
-| `POST /guardrails/apply_guardrail` | 不呼叫 LLM 直接測 | evaluation target 與 `litellm_admin test` 使用 |
-
-- `litellm_params.api_key` / `api_base` 若為 `os.environ/NAME`，在 proxy 端初始化時以 `get_secret` 解析（`guardrail_registry.py`）。
-- 存 DB 時，litellm_params 會以 `model_dump()`（含所有預設值）序列化成 JSON；所以 diff 只比對 spec 中**有寫的 key**。
-- 其他 pod 透過 `_init_non_llm_objects_in_db`（DB polling，受 `general_settings.supported_db_objects` 控制）同步。
-
-## 2. 為什麼選 `generic_guardrail_api` + 獨立服務
-
-| 選項 | 優點 | 缺點 |
-|---|---|---|
-| **generic_guardrail_api → 自建 FastAPI 服務**（採用） | proxy 只需透過 admin API 註冊，不必改 config、不必部署程式碼到 proxy；guard 服務獨立部署/擴充/換模型；可在 proxy 外單獨評測；多個 guardrail 名稱可做 A/B / shadow | 多一跳 HTTP（同機房 ~1ms） |
-| proxy 內 custom guardrail（`guardrail: module.Class`） | 可拿到完整 request（含 post_call 的 prompt） | 需要把 Python 檔放進 proxy image / config（**沒有 config 權限時不可行**）；跑在 proxy 進程內，升級 LiteLLM 容易壞 |
-| SaaS（Lakera、Azure…） | 免維運 | 資料外送、延遲、無法客製 zh-TW / 公司 policy、成本 |
+- guard 模型跑在 MIG 上的 vLLM，server 是一個輕量的 async 服務。兩者都可以獨立部署、擴充，換模型只需要換 preset 再重啟 server。
+- 同一個 pipeline 可以直接被評測打（`/v1/classify` 或正式 endpoint）。評測量到的就是部署出去的那一台 server，並且用 `config_hash` 對得上設定。
 
 ## 3. Guardrail 服務內部
 
 ```
-LiteLLM request ──► build_inputs()  (request_scope: last_user | all_user | all_texts)
+request ──► build_inputs()  (request_scope: last_user | all_user | all_texts)
                         │
                         ▼
                  GuardPipeline.run()
@@ -61,10 +39,10 @@ LiteLLM request ──► build_inputs()  (request_scope: last_user | all_user |
 
 - **會判斷哪些內容**（每項都是一個額外的 `GuardInput`，帶有 `origin` 欄位）：
   - 最新的 user 訊息（依 `request_scope`）。
-  - client 的 **system / developer 訊息**（`pipeline.judge_system_messages`，預設 true；shared proxy 上 client 可以自己寫 system prompt）。
+  - client 的 **system / developer 訊息**（`pipeline.judge_system_messages`，預設 true；client 可以自己寫 system prompt）。
   - 最後一則 user 訊息之後的 **tool 輸出與 assistant 文字**（`pipeline.judge_tool_messages`，預設 true；indirect prompt injection 就藏在這裡）。
   - **tool_calls**（函式名稱 + 參數，request 與 response 兩側都判斷；任何 rule 命中都回 BLOCKED，因為 tool call 沒辦法遮罩）。
-- **限制**：stage 名稱不能重複；每個 input type 最多只能有一個會遮罩的 stage（LiteLLM 依位置替換 texts，兩組遮罩無法合併）；shadow stage 在 LiteLLM 路由上以背景工作執行，不佔請求延遲，`/v1/classify` 的 `run_all` 會等它跑完。
+- **限制**：stage 名稱不能重複；每個 input type 最多只能有一個會遮罩的 stage（呼叫端依位置替換 texts，兩組遮罩無法合併）；shadow stage 在 LiteLLM 路由上以背景工作執行，不佔請求延遲，`/v1/classify` 的 `run_all` 會等它跑完。
 - **Context 上限**：`openai_guard` 依 `max_model_len`（必須等於 vLLM 的 `--max-model-len`）估算 token 預算，並保留頭尾截斷。估算時數字與標點各算 1 個 token，因為 Qwen 會逐位切數字。伺服器回 context 過長時，依「實際送出量 × 伺服器回報的超出比例」縮減，最多重試 3 次；仍失敗就回 error，由 `on_error` 決定。
 - **`request_scope: last_user`**（預設）：只判斷最新一則 user 訊息，之前的對話當 context。否則多輪對話中一句舊的可疑內容會讓之後每一輪都被擋。若要抓「分多輪拼湊的攻擊」，改用 `all_user`。
 - **分數**：`openai_guard` 從 vLLM logprobs 算 P(unsafe)，只在「anchor 之後、模型實際產生 label token」的位置讀，不讀空白、引號，也不讀 `<think>` 內的位置。有分數時由 `threshold` 決定，hard label 保留在 `extra.hard_label_unsafe`。parser 因選項而推翻 label 時（例如 ignored category），分數會改成和判定一致，原始值存在 `extra.label_score`。rule stage（regex）不產生假機率，分數是 `None`；但 rule 擋下的列，pipeline 分數固定為 1.0，re-threshold 時才不會把它當成放行。
@@ -96,7 +74,7 @@ LiteLLM request ──► build_inputs()  (request_scope: last_user | all_user |
 | `PARSERS` | `src/server/backends/parsers.py` | `OutputParser` | stage `parser:` + `parser_options:` | — |
 | `PROMPT_BUILDERS` | `src/server/backends/prompts.py` | `PromptBuilder` | stage `prompt_mode:` | — |
 | `TASKS` | `src/evaluation/tasks/base.py` | `EvalTask` | `task.type:` | `python -m src.evaluation --list` |
-| `TARGETS` | `src/evaluation/targets.py` | `Target` | `target.type:`（guardrail task） | 同上 |
+| `TARGETS` | `src/evaluation/targets.py` | `Target` | `target.type:`（guardrail task；預設 `guardrail_server`） | 同上 |
 | `GENERATORS` | `src/evaluation/generation.py` | `Generator` | `task.model_safety.generator.type:` | 同上 |
 | `REFUSAL_JUDGES` | `src/refuse_judge/base.py` | `RefusalJudge` | `judge.type:` | `python -m src.refuse_judge --list` |
 
@@ -142,7 +120,7 @@ openai_guard = PromptBuilder [PROMPT_BUILDERS] (chat_template · policy · chat_
 
 ```
 EvalTask [TASKS]
-├─ guardrail      -> Target [TARGETS]: inprocess · guardrail_server · litellm_apply_guardrail · litellm_chat
+├─ guardrail      -> Target [TARGETS]: guardrail_server（預設，打 server）· inprocess
 ├─ model_safety   -> Generator [GENERATORS]: openai_chat · mock   +  RefusalJudge  (+ optional harm GuardPipeline)
 └─ refusal_judge  -> RefusalJudge [REFUSAL_JUDGES]: keyword · llm · qwen3guard_refusal · hf_classifier · cascade · vote
 ```

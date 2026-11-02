@@ -24,7 +24,7 @@ ARG_TO_KEY = {
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="OJT guardrail server (LiteLLM generic_guardrail_api backend)")
+    p = argparse.ArgumentParser(description="OJT guardrail server")
     p.add_argument("--config", nargs="+", default=["src/config/server/default.yaml"], help="YAML files, merged in order")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE", help="dotted override, repeatable")
     p.add_argument("--env-file", default=".env")

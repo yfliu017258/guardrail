@@ -39,16 +39,15 @@ python -m src.evaluation.compare results/*model-safety*/ results/*qwen3.6*/ resu
 flowchart LR
     D[processed CSV<br/>request rows] --> G[Generator<br/>GENERATORS registry<br/>openai_chat / mock]
     G -- text + reasoning(分開) --> J[RefusalJudge<br/>REFUSAL_JUDGES registry]
-    G -. 被 proxy guardrail 擋 .-> B[blocked → 算作 refusal<br/>（system-level 評測）]
     J --> R[refusal / partial / compliance]
     G -. optional .-> H[harm_guard<br/>GuardPipeline 判斷回覆是否有害]
     R --> M[metrics：拒答率、過度拒答率、<br/>partial 率、ASR、harmful 率、分類別]
     H --> M
 ```
 
-- **Generator**（`src/evaluation/generation.py`）：`openai_chat` 適用 vLLM 直連或 LiteLLM proxy；thinking 內容（`reasoning_content` 或 inline `<think>`）會分開存，**永遠不拿來判斷**，只判斷使用者看得到的回答。
+- **Generator**（`src/evaluation/generation.py`）：`openai_chat` 打模型的 OpenAI-compatible endpoint（vLLM）；thinking 內容（`reasoning_content` 或 inline `<think>`）會分開存，**永遠不拿來判斷**，只判斷使用者看得到的回答。
 - **快取**：每筆紀錄會存 `gen_fingerprint`，即 model、system_prompt、temperature、max_tokens、seed、extra_body 的 hash。`reuse_generations_from` 只會重用 fingerprint 相同的生成結果，避免混到不同設定的回答。
-- **裸模型 vs 系統**：直接打 vLLM，或用沒掛 guardrail 的 key，量到的是裸模型。經過有 guardrail 的 proxy 時，被擋的請求會記為 `blocked`，預設算作 refusal，量到的是「模型 + guardrail」的系統表現。兩個都有用，但不要混在一起比較。
+- **裸模型**：直接打模型的 vLLM，中間不經過任何 guardrail。
 - **拒答 ≠ 安全**：沒拒答不代表有害（可能是安全的回答），部分拒答也可能洩漏有害內容。所以可以另外開 `harm_guard`，用 guard 模型判斷回覆本身，report 會多出 `harmful_response_rate_unsafe` 與 `harmful_given_not_refused`。
 
 ## 3. Refusal judges（`src/refuse_judge`）

@@ -1,13 +1,14 @@
 # Reproduces the current "SaaS / general LLM + prompt" approach inside the same harness, so it can be
-# compared on identical data. Point base_url/model at the internal LLM (or the LiteLLM proxy itself).
+# compared on identical data. Point it at the internal LLM's OpenAI-compatible endpoint.
 _base_: [../default.yaml, _llm_stage_defaults.yaml]
 run: {name: llm-judge-baseline}
 pipeline:
   stages:
     - name: llm_judge
       type: openai_guard
-      base_url: http://localhost:4000/v1
-      api_key_env: LITELLM_API_KEY
+      base_url: http://localhost:8000/v1
+      base_url_env: JUDGE_BASE_URL     # the internal LLM used as the judge
+      api_key_env: JUDGE_API_KEY
       model: internal-llm
       max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)
       parser: json_policy

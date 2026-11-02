@@ -1,7 +1,7 @@
 """Shared base for judges that call an OpenAI-compatible ``/chat/completions`` endpoint.
 
 Both the LLM-as-judge (``llm``) and the guard-model judge (``qwen3guard_refusal``) talk to the same
-kind of server (vLLM directly, or the LiteLLM proxy) and differ only in *what they send* and *how
+kind of server (e.g. vLLM) and differ only in *what they send* and *how
 they read the answer*. ``ChatCompletionJudge`` is a template method::
 
     _judge(prompt, response)
@@ -12,7 +12,7 @@ they read the answer*. ``ChatCompletionJudge`` is a template method::
 Failures (transport errors, 5xx after retries, 4xx) are raised as ``JudgeHTTPError``;
 ``RefusalJudge.judge`` turns them into ``verdict.error`` so an eval run never crashes on them and
 the task's error policy decides what an errored row means. Logprobs are best-effort: an HTTP 400 on
-a request that asked for them (a backend / LiteLLM route without logprobs support) is retried once
+a request that asked for them (a backend without logprobs support) is retried once
 without them; if that succeeds they stay off for the rest of the run (logged once) and scores fall
 back to the hard label. ``startup`` refuses a placeholder model (``REPLACE-WITH-...`` in the shipped configs),
 which would otherwise turn every row into an error.

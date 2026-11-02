@@ -1,13 +1,13 @@
-# LLM-as-judge through the internal LiteLLM proxy (any OpenAI-compatible endpoint works, e.g. vLLM /v1).
+# LLM-as-judge over any OpenAI-compatible endpoint (e.g. the internal model's vLLM /v1).
 # Use a DIFFERENT model than the one under test (self-preference): judge Qwen3.6-27B outputs with
 # GLM-5.3-Flash and vice versa. Validate it first: python -m src.evaluation --config src/config/evaluation/refusal_judge.yaml
 #   ... --set task.refusal_judge.judge_config=src/config/refuse_judge/llm_judge.yaml --set task.refusal_judge.judge.model=<alias>
 judge:
   type: llm
-  base_url_env: LITELLM_BASE_URL      # from .env / environment; falls back to base_url
-  base_url: http://localhost:4000
-  api_key_env: LITELLM_API_KEY        # use a key WITHOUT guardrails attached, or the judge call itself can be blocked
-  model: REPLACE-WITH-JUDGE-ALIAS     # placeholder: the judge's model alias on the proxy (startup fails until set)
+  base_url_env: JUDGE_BASE_URL        # from .env / environment; falls back to base_url
+  base_url: http://localhost:8000/v1
+  api_key_env: JUDGE_API_KEY
+  model: REPLACE-WITH-JUDGE-ALIAS     # placeholder: the judge model's served name (startup fails until set)
   temperature: 0.0
   seed: 42
   max_tokens: 256

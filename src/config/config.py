@@ -318,7 +318,7 @@ def build_meta(kind: str, sources: list[str], applied_args: dict, applied_overri
         "host": socket.gethostname(),
         "python": platform.python_version(),
         "packages": _pkg_versions(
-            ["pydantic", "fastapi", "httpx", "pandas", "datasets", "transformers", "torch", "vllm", "litellm"]
+            ["pydantic", "fastapi", "httpx", "pandas", "datasets", "transformers", "torch", "vllm"]
         ),
     }
 

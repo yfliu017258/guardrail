@@ -8,7 +8,7 @@ from typing import Any
 from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 
 DEFAULT_KEYWORDS = {
-    "prompt_injection": ["ignore previous instructions", "ignore all previous", "忽略之前的指令", "忽略以上", "system prompt"],
+    "prompt_injection": ["ignore previous instructions", "ignore all previous", "忽略之前的指令", "忽略之前的所有指令", "忽略以上", "system prompt"],
     "jailbreak": ["dan mode", "developer mode", "jailbreak", "越獄"],
     "weapons_cbrn": ["make a bomb", "炸彈", "nerve agent"],
     "crime": ["steal credit card", "malware", "ransomware", "勒索軟體"],

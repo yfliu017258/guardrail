@@ -1,12 +1,15 @@
-# GPU-free end-to-end check: mock backend + bundled sample data. Used by tests and CI.
+# GPU-free end-to-end check against a RUNNING guardrail server with the mock backend:
+#   python -m src.server --config src/config/server/mock.yaml --port 8080 &
+#   python -m src.evaluation --config src/config/evaluation/smoke.yaml
+# (tests start the server themselves via src.server.testing.BackgroundServer)
 _base_: default.yaml
 run:
   name: smoke
 data:
   files: [processed_data/samples/smoke.csv]
 target:
-  type: inprocess
-  inprocess:
-    server_config: [src/config/server/mock.yaml]
+  type: guardrail_server
+  guardrail_server:
+    api_key_env: null          # mock.yaml runs without auth
 metrics:
   bootstrap: 200

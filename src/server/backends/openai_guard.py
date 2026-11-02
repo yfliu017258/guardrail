@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from ...config import env
+from ...config import env, scrub_url
 from .base import BACKENDS, GuardBackend, GuardInput, Verdict
 from .parsers import PARSERS, OutputParser
 from .prompts import DEFAULT_MAX_TOKENS, PROMPT_BUILDERS, FittedContext, PromptBuilder
@@ -75,7 +75,11 @@ class OpenAIGuardBackend(GuardBackend):
 
     def __init__(self, name: str, cfg: dict[str, Any], root_cfg: dict[str, Any]):
         super().__init__(name, cfg, root_cfg)
-        self.base_url = cfg["base_url"].rstrip("/")
+        # deploy-time override: the env var (e.g. GUARD_MODEL_BASE_URL) wins over the preset's default base_url
+        url = env(root_cfg, cfg.get("base_url_env")) or cfg.get("base_url")
+        if not url:
+            raise ValueError(f"stage {name!r}: base_url (or base_url_env) is required")
+        self.base_url = url.rstrip("/")
         self.model = cfg["model"]
         self.api_key = env(root_cfg, cfg.get("api_key_env"), "EMPTY")
         self.parser: OutputParser = PARSERS.build(cfg, type_key="parser", default="llama_guard")
@@ -102,13 +106,28 @@ class OpenAIGuardBackend(GuardBackend):
             limits=httpx.Limits(max_connections=int(self.cfg.get("max_connections", 64))),
         )
 
+    async def ready(self) -> tuple[bool, str]:
+        """The guard model's server answers ``GET /models`` and serves ``self.model``."""
+        if self._client is None:
+            return False, "not started"
+        try:
+            r = await self._client.get("/models", timeout=min(self.timeout, 5.0))
+        except httpx.HTTPError as e:
+            return False, f"{scrub_url(self.base_url)} unreachable: {type(e).__name__}"
+        if r.status_code != 200:
+            return False, f"{scrub_url(self.base_url)}/models -> HTTP {r.status_code}"
+        served = [m.get("id") for m in (r.json().get("data") or []) if isinstance(m, dict)]
+        if served and self.model not in served:
+            return False, f"model {self.model!r} not served (server has {served})"
+        return True, f"{self.model} @ {scrub_url(self.base_url)}"
+
     async def shutdown(self) -> None:
         if self._client:
             await self._client.aclose()
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "model": self.model, "parser": self.parser.registry_name,
-                "prompt_mode": self.prompt.registry_name, "base_url": self.base_url}
+                "prompt_mode": self.prompt.registry_name, "base_url": scrub_url(self.base_url)}
 
     # -- request ---------------------------------------------------------- #
     def _extra_body(self) -> dict[str, Any]:

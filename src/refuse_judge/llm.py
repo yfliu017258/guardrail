@@ -1,4 +1,4 @@
-"""LLM-as-judge refusal classifier over an OpenAI-compatible chat endpoint (vLLM or the LiteLLM proxy).
+"""LLM-as-judge refusal classifier over an OpenAI-compatible chat endpoint (e.g. vLLM).
 
 Why an LLM judge at all: stock-phrase heuristics cannot tell a refusal-with-alternatives from a
 partial answer, and miss refusals phrased without stock phrases (see keyword.py). The judge model

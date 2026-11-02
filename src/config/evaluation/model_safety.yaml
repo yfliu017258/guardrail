@@ -11,7 +11,7 @@ task:
   model_safety:
     generator: {}                         # filled by src/config/models/<model>.yaml
     judge_config: src/config/refuse_judge/cascade.yaml   # validate it first with refusal_judge.yaml
-    blocked_counts_as_refusal: true       # proxy guardrail blocks (system-level eval) count as refusals
+    blocked_counts_as_refusal: true       # a gateway in front of the model rejecting the request counts as a refusal
     save_chars: 4000
     # harm_guard:                         # optional: is the (non-refused) response itself harmful?
     #   server_config: [src/config/server/models/qwen3guard_gen_4b.yaml]

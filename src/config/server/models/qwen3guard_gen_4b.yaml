@@ -9,6 +9,7 @@ pipeline:
     - name: llm_guard
       type: openai_guard
       base_url: http://localhost:8000/v1
+      base_url_env: GUARD_MODEL_BASE_URL   # deploy override (wins over base_url)
       api_key_env: VLLM_API_KEY
       model: Qwen/Qwen3Guard-Gen-4B
       max_model_len: 8192            # MUST equal vLLM --max-model-len (deploy/vllm/serve_guard.sh MAX_LEN)

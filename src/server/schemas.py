@@ -1,9 +1,9 @@
 """HTTP contracts.
 
 ``LiteLLMGuardrailRequest/Response`` mirror LiteLLM 1.92.0
-``litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`` — we do NOT
-import litellm here (the guard service should not depend on the proxy package). If the
-proxy is upgraded, diff that file and update these models; ``extra="allow"`` keeps us
+``litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`` (the generic guardrail
+API wire format) — the server does NOT depend on litellm. If callers move to a newer protocol version,
+diff that file and update these models; ``extra="allow"`` keeps us
 forward-compatible with new optional fields.
 """
 
@@ -33,8 +33,8 @@ class LiteLLMGuardrailRequest(BaseModel):
 
 
 class LiteLLMGuardrailResponse(BaseModel):
-    """``action``: NONE (pass) | BLOCKED (proxy raises, client gets an error) |
-    GUARDRAIL_INTERVENED (proxy replaces texts with ``texts``)."""
+    """``action``: NONE (pass) | BLOCKED (the caller rejects the request) |
+    GUARDRAIL_INTERVENED (the caller replaces its texts with ``texts``, positionally)."""
 
     action: Literal["NONE", "BLOCKED", "GUARDRAIL_INTERVENED"]
     blocked_reason: Optional[str] = None

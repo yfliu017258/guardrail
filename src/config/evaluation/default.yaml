@@ -4,8 +4,8 @@ run:
   seed: 42
   output_dir: results
 
-env_passthrough: [GUARDRAIL_API_KEY, VLLM_API_KEY, LITELLM_API_KEY, LITELLM_BASE_URL, GUARDRAIL_SERVER_URL, HF_TOKEN,
-                  MODEL_BASE_URL, MODEL_API_KEY]
+env_passthrough: [GUARDRAIL_API_KEY, GUARDRAIL_SERVER_URL, GUARD_MODEL_BASE_URL, VLLM_API_KEY, HF_TOKEN,
+                  MODEL_BASE_URL, MODEL_API_KEY, JUDGE_BASE_URL, JUDGE_API_KEY]
 
 task:
   type: guardrail            # guardrail | model_safety | refusal_judge   (python -m src.evaluation --list)
@@ -21,31 +21,23 @@ data:
   # duplicates (same sample_id) are always dropped: predictions are keyed by sample_id
 
 target:
-  type: inprocess             # inprocess | guardrail_server | litellm_apply_guardrail | litellm_chat
+  type: guardrail_server      # guardrail_server (a running server) | inprocess (same pipeline, no server)
+  guardrail_server:
+    base_url: null            # explicit URL (--server-url) wins over base_url_env, which wins over default_base_url
+    base_url_env: GUARDRAIL_SERVER_URL
+    default_base_url: http://localhost:8080
+    api_key_env: GUARDRAIL_API_KEY    # sent as x-api-key
+    endpoint: classify        # classify: /v1/classify, per-stage verdicts + scores (model / threshold analysis)
+                              # guardrail_api: the production endpoint, decision only (what production returns)
+    run_all: true             # classify: run every stage (no short-circuit) -> per-stage metrics
+    stages: null              # classify: restrict to these stage names
+    response_context: none    # none = like production response checks (no prompt sent); prompt = add the user turn
+    canary: true              # a known injection must be BLOCKED at startup, else abort (wrong config / fail-open)
   inprocess:
     server_config: [src/config/server/default.yaml]
     overrides: []             # dotted overrides applied to the server config
-    run_all: true             # evaluate every stage (no short-circuit) -> per-stage metrics
-    response_context: none    # none = like LiteLLM post_call (no prompt sent); prompt = give the guard the user turn
-  guardrail_server:
-    base_url: http://localhost:8080
-    base_url_env: GUARDRAIL_SERVER_URL
-    api_key_env: GUARDRAIL_API_KEY
     run_all: true
-    stages: null
-  litellm:
-    base_url: http://localhost:4000
-    base_url_env: LITELLM_BASE_URL
-    api_key_env: LITELLM_API_KEY
-    guardrail_name: ojt-guard-pre           # for litellm_apply_guardrail (request rows)
-    response_guardrail_name: ojt-guard-post # for litellm_apply_guardrail (response rows)
-    request_guardrails: [ojt-guard-pre]     # for litellm_chat
-    response_guardrails: [ojt-guard-post]
-    model: internal-llm                     # any model alias on the proxy (response rows use mock_response)
-    max_tokens: 1
-    blocked_status_codes: [400]
-    blocked_markers: [guardrail, blocked, violat, 攔截]
-    canary: true              # a known injection must come back BLOCKED at startup, else abort (catches fail-open)
+    response_context: none
 
 eval:
   concurrency: 16
