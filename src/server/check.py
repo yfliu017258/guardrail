@@ -11,7 +11,8 @@ Checks (each PASS / FAIL / WARN, exit code 1 on any FAIL):
     benign zh-TW / en pass, injection / jailbreak / harmful requests block, injection hidden in a client
     system message or a tool result blocks, a harmful response blocks, PII is masked or blocked
   * /v1/classify agrees with the production endpoint on the same text
-  * optional load test (--load N): p50 / p95 / p99 latency and error count at --concurrency
+  * optional load test (--load N): p50 / p95 / p99 latency at --concurrency, AND that decisions stay right
+    and no stage errors (fail-open passes) occur under load
 
 Cases file (YAML list) adds or overrides cases::
 
@@ -171,32 +172,49 @@ async def run_checks(url: str, api_key: str | None, cases: list[Case], load: int
 
 
 async def _load_test(c: httpx.AsyncClient, rep: Report, n: int, concurrency: int) -> None:
-    texts = [case.texts[0] for case in BUILTIN_CASES if case.input_type == "request" and not case.structured_messages]
+    """Latency under concurrency AND correctness under load: a guard stage that times out under load fails
+    open, so "200 OK, low latency" alone would hide that every request passed unchecked. Uses single-text
+    cases with a known expected decision, and the server's own stage-error counter (/v1/stats)."""
+    cases = [cs for cs in BUILTIN_CASES if not cs.structured_messages and len(cs.texts) == 1 and not cs.tool_calls]
     sem = asyncio.Semaphore(concurrency)
     lat: list[float] = []
-    errors = 0
+    errors = wrong = stage_errors = 0
+
+    async def stats_errors() -> int | None:
+        r = await c.get("/v1/stats")
+        return int(r.json().get("errors", 0)) if r.status_code == 200 else None
 
     async def one(i: int) -> None:
-        nonlocal errors
+        nonlocal errors, wrong, stage_errors
+        case = cases[i % len(cases)]
         async with sem:
             t0 = time.perf_counter()
             try:
-                r = await c.post("/beta/litellm_basic_guardrail_api",
-                                 json={"input_type": "request", "texts": [texts[i % len(texts)]], "request_data": {}})
+                r = await c.post("/beta/litellm_basic_guardrail_api", json=case.payload())
                 if r.status_code != 200:
                     errors += 1
+                else:
+                    if r.headers.get("x-guardrail-stage-errors"):
+                        stage_errors += 1
+                    if not _matches(case.expect, r.json().get("action")):
+                        wrong += 1
             except httpx.TransportError:
                 errors += 1
             lat.append((time.perf_counter() - t0) * 1000)
 
+    before = await stats_errors()
     t0 = time.perf_counter()
     await asyncio.gather(*(one(i) for i in range(n)))
     wall = time.perf_counter() - t0
+    after = await stats_errors()
     lat.sort()
     q = lambda p: lat[min(len(lat) - 1, int(p * len(lat)))]  # noqa: E731
+    server_errors = (after - before) if (before is not None and after is not None) else None
     detail = (f"n={n} concurrency={concurrency} p50={statistics.median(lat):.0f}ms p95={q(0.95):.0f}ms "
-              f"p99={q(0.99):.0f}ms rps={n / wall:.1f} errors={errors}")
-    rep.add("FAIL" if errors else "PASS", "load", detail)
+              f"p99={q(0.99):.0f}ms rps={n / wall:.1f} http_errors={errors} wrong_decisions={wrong} "
+              f"stage_errors={stage_errors}" + (f" (server counter +{server_errors})" if server_errors is not None else ""))
+    failed = errors or wrong or stage_errors or (server_errors or 0) > 0
+    rep.add("FAIL" if failed else "PASS", "load", detail)
 
 
 def main(argv: list[str] | None = None) -> int:

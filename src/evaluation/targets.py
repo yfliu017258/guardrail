@@ -44,19 +44,24 @@ class Prediction:
     parse_ok: bool = True
     error: str | None = None
     raw: str | None = None
+    shadow_stages: list[str] = field(default_factory=list)  # in stage_unsafe for analysis, never deciding
+    shadow_errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 def _pred_from_pipeline_dict(sample_id: str, d: dict, latency_ms: float, save_raw: bool,
-                             stage_errors: str = "retry") -> Prediction:
+                             stage_errors: str = "retry", shadow: set[str] | frozenset[str] = frozenset()) -> Prediction:
     """Pipeline result -> Prediction. A stage that *errored* (backend down, timeout, bug) is not a
     decision: by default the row raises ``TargetError`` (retried, then recorded as an error) instead of
     being scored as the stage's fail-open 'safe'. ``eval.stage_errors: accept`` keeps the production
     fail-open/closed outcome (to measure the deployed behaviour during an outage)."""
     verdicts = d.get("verdicts", [])
-    errors = d.get("errors") or []
+    shadow = set(shadow) | set(d.get("shadow_stages") or [])
+    # only LIVE stages decide: a broken shadow candidate must not turn valid rows into errors
+    errors = [e for e in (d.get("errors") or []) if e.split(":", 1)[0] not in shadow]
+    shadow_errors = [e for e in (d.get("errors") or []) if e.split(":", 1)[0] in shadow]
     if errors and stage_errors == "retry":
         raise TargetError("stage error: " + "; ".join(errors))
     stage_unsafe: dict[str, bool] = {}
@@ -71,7 +76,8 @@ def _pred_from_pipeline_dict(sample_id: str, d: dict, latency_ms: float, save_ra
             stage_scores[v["stage"]] = max(sc, stage_scores.get(v["stage"]) or 0.0)
         else:
             stage_scores.setdefault(v["stage"], None)
-        parse_ok = parse_ok and v.get("extra", {}).get("parse_ok", True)
+        if v["stage"] not in shadow:
+            parse_ok = parse_ok and v.get("extra", {}).get("parse_ok", True)
         if save_raw and v.get("raw"):
             raws.append(f"[{v['stage']}] {v['raw']}")
     return Prediction(
@@ -79,6 +85,7 @@ def _pred_from_pipeline_dict(sample_id: str, d: dict, latency_ms: float, save_ra
         blocked_by=d.get("blocked_by", []), action=d.get("action"), stage_unsafe=stage_unsafe,
         stage_scores=stage_scores, latency_ms=latency_ms, server_latency_ms=d.get("latency_ms"),
         parse_ok=parse_ok, error="; ".join(errors) or None, raw="\n".join(raws)[:4000] if raws else None,
+        shadow_stages=sorted(shadow & set(stage_unsafe)), shadow_errors=shadow_errors,
     )
 
 
@@ -144,7 +151,8 @@ class InProcessTarget(Target):
     def describe(self) -> dict[str, Any]:
         from ..config import config_hash
 
-        return {"type": self.name, "stages": self.pipeline.describe(), "server_config_hash": config_hash(self.server_cfg),
+        return {"type": self.name, "run_all": self.run_all, "stages": self.pipeline.describe(),
+                "server_config_hash": config_hash(self.server_cfg),
                 "server_config": {k: v for k, v in self.server_cfg.items() if k not in ("envs", "meta")}}
 
     async def predict(self, s: GuardrailSample) -> Prediction:
@@ -155,8 +163,9 @@ class InProcessTarget(Target):
             inputs = self.pipeline.build_inputs("request", [s.prompt], [{"role": "user", "content": s.prompt}])
         t0 = time.perf_counter()
         res = await self.pipeline.run(inputs, run_all=self.run_all)
+        shadow = {st.backend.name for st in self.pipeline.stages if st.shadow}
         return _pred_from_pipeline_dict(s.sample_id, res.to_dict(), (time.perf_counter() - t0) * 1000, self.save_raw,
-                                        self.stage_errors)
+                                        self.stage_errors, shadow)
 
 
 class _HTTPTarget(Target):
@@ -217,6 +226,9 @@ class GuardrailServerTarget(_HTTPTarget):
             raise ValueError(f"target.guardrail_server.endpoint must be one of {self.ENDPOINTS}, got {self.endpoint!r}")
         # production parity: the response hook receives only the response texts, no prompt
         self.response_context = self.tcfg.get("response_context", "none")
+        if self.endpoint == "guardrail_api" and self.response_context != "none":
+            raise ValueError("endpoint guardrail_api sends what production sends (no prompt with responses); "
+                             "response_context: prompt needs endpoint: classify")
         self.server_info: dict[str, Any] = {}
         self.server_info_end: dict[str, Any] | None = None
 
@@ -251,13 +263,21 @@ class GuardrailServerTarget(_HTTPTarget):
             self.server_info_end = {"error": "could not re-read /v1/info after the run"}
         await super().shutdown()
 
+    @staticmethod
+    def identity(info: dict[str, Any]) -> dict[str, Any]:
+        """What makes two servers 'the same guardrail': the deciding pipeline and the server code — not the
+        port, log level or start time (identical replicas compare equal)."""
+        git = info.get("git") or {}
+        return {"pipeline_hash": info.get("pipeline_hash") or info.get("config_hash"),
+                "commit": git.get("commit"), "dirty": git.get("dirty"), "version": info.get("version")}
+
     @property
-    def server_changed(self) -> bool:
-        """The server answering at the end of the run is not configured like the one at the start
-        (restarted with another preset / threshold): the predictions mix two guardrails."""
-        if not self.server_info_end:
-            return False
-        return self.server_info_end.get("config_hash") != self.server_info.get("config_hash")
+    def server_changed(self) -> bool | None:
+        """True: the server answering at the end is a different guardrail than at the start (restarted with
+        another preset / threshold / code) — the predictions mix two. None: could not be verified."""
+        if not self.server_info_end or "error" in self.server_info_end:
+            return None
+        return self.identity(self.server_info_end) != self.identity(self.server_info)
 
     async def _canary(self) -> None:
         text = self.tcfg.get("canary_text", self.CANARY)
@@ -269,8 +289,13 @@ class GuardrailServerTarget(_HTTPTarget):
 
     def describe(self) -> dict[str, Any]:
         info = self.server_info or {}
+        server_stages = info.get("stages", [])
+        flt = self.tcfg.get("stages")
+        evaluated = [st for st in server_stages if not flt or st.get("name") in flt]  # what this run scored
         out = {**super().describe(), "endpoint": self.endpoint, "response_context": self.response_context,
-               "stages": info.get("stages", []), "server_config_hash": info.get("config_hash"), "server_info": info}
+               "stages": evaluated, "server_stages": server_stages, "stage_filter": flt,
+               "server_identity": self.identity(info) if info else None,
+               "server_config_hash": info.get("config_hash"), "server_info": info}
         if self.server_info_end is not None:
             out["server_info_end"] = self.server_info_end
             out["server_changed_during_run"] = self.server_changed
@@ -288,7 +313,8 @@ class GuardrailServerTarget(_HTTPTarget):
             payload["text"] = s.prompt
         r, ms = await self._post("/v1/classify", payload)
         self._raise_for_status(r)
-        return _pred_from_pipeline_dict(s.sample_id, r.json(), ms, self.save_raw, self.stage_errors)
+        shadow = {st.get("name") for st in (self.server_info or {}).get("stages", []) if st.get("shadow")}
+        return _pred_from_pipeline_dict(s.sample_id, r.json(), ms, self.save_raw, self.stage_errors, shadow)
 
     async def _predict_guardrail_api(self, s: GuardrailSample) -> Prediction:
         """The production request shape: request rows carry the conversation, response rows only the texts."""
@@ -300,11 +326,18 @@ class GuardrailServerTarget(_HTTPTarget):
         payload["litellm_call_id"] = f"eval-{s.sample_id}"
         r, ms = await self._post("/beta/litellm_basic_guardrail_api", payload)
         self._raise_for_status(r)
+        errored = r.headers.get("x-guardrail-stage-errors")
+        if errored:  # the action is the stages' on_error outcome, not a decision
+            if self.stage_errors == "retry":
+                raise TargetError(f"stage error (production endpoint): {errored}")
+            stage_error = f"stage error: {errored}"
+        else:
+            stage_error = None
         body = r.json()
         action = body.get("action")
         if action not in ("NONE", "BLOCKED", "GUARDRAIL_INTERVENED"):
             return Prediction(s.sample_id, unsafe=None, latency_ms=ms, error=f"unexpected action {action!r}")
-        return Prediction(s.sample_id, unsafe=action == "BLOCKED", action=action, latency_ms=ms,
+        return Prediction(s.sample_id, unsafe=action == "BLOCKED", action=action, latency_ms=ms, error=stage_error,
                           raw=(body.get("blocked_reason") or None) if self.save_raw else None)
 
     @staticmethod

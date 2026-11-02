@@ -1,7 +1,7 @@
 """Run the guardrail service.
 
     python -m src.server --config src/config/server/default.yaml
-    python -m src.server --config src/config/server/default.yaml src/config/server/qwen3guard.yaml --port 8081
+    python -m src.server --config src/config/server/models/qwen3guard_gen_4b.yaml --port 8081
     python -m src.server --config src/config/server/mock.yaml --set pipeline.strategy=parallel
 """
 

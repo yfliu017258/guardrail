@@ -17,14 +17,16 @@ ignores ``GUARDRAIL_INTERVENED`` on streamed output, so a streaming deployment m
 
 from __future__ import annotations
 
+import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ...config import PROJECT_ROOT
+from ...config.config import _resolve_path
 from .base import BACKENDS, GuardBackend, GuardInput, Verdict
+
+log = logging.getLogger("guardrail.regex")
 
 #: ASCII-only word boundaries (``\b`` treats CJK as word characters, see the module docstring).
 _B = r"(?<![A-Za-z0-9_])"
@@ -54,13 +56,21 @@ class RegexBackend(GuardBackend):
         disabled = set(cfg.get("disable", []))
         rules = [r for r in rules if r["name"] not in disabled]
         rules += cfg.get("rules", [])
+        self.rules_file_loaded: bool | None = None  # None = no rules_file configured
         if cfg.get("rules_file"):
-            p = Path(cfg["rules_file"])
-            p = p if p.is_absolute() else PROJECT_ROOT / p
-            if p.exists():
+            try:  # same resolution as the config loader (cwd, repo root, config dir), so hashes and stage agree
+                p = _resolve_path(cfg["rules_file"])
+            except FileNotFoundError:
+                p = None
+            if p is not None:
                 rules += yaml.safe_load(p.read_text(encoding="utf-8")) or []
+                self.rules_file_loaded = True
             elif cfg.get("rules_file_required", False):
-                raise FileNotFoundError(p)
+                raise FileNotFoundError(f"stage {name!r}: rules_file {cfg['rules_file']!r} not found")
+            else:
+                self.rules_file_loaded = False
+                log.warning("stage %s: rules_file %s not found - running with built-in rules only "
+                            "(set rules_file_required: true to make this fatal)", name, cfg["rules_file"])
         self.rules = [
             {**r, "_re": re.compile(r["pattern"], re.IGNORECASE if r.get("ignore_case", False) else 0)}
             for r in rules
@@ -79,8 +89,12 @@ class RegexBackend(GuardBackend):
         return any(r.get("action", "block") == "mask" for r in self.rules)
 
     def describe(self) -> dict[str, Any]:
-        return {**super().describe(), "rules": [r["name"] for r in self.rules],
-                "response_mask_action": self.response_mask_action}
+        out = {**super().describe(), "rules": [r["name"] for r in self.rules],
+               "response_mask_action": self.response_mask_action}
+        if self.rules_file_loaded is not None:
+            out["rules_file"] = self.cfg.get("rules_file")
+            out["rules_file_loaded"] = self.rules_file_loaded
+        return out
 
     def _mask_blocks(self, inp: GuardInput) -> bool:
         """True when a mask hit on ``inp`` must block: the redaction could not be applied."""

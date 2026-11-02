@@ -192,11 +192,20 @@ def project_stage(r: Row, score_stage: str | None) -> Row:
 
     The pipeline-level ``score`` is a max over stages, which mixes real probabilities with
     rule stages' pseudo-scores — re-thresholding it silently decides rows from the wrong stage.
-    With a score stage, the re-thresholded decision is: any *other* stage blocked, or this stage's
-    score >= threshold (its hard label when it produced no score)."""
-    if not score_stage or score_stage not in (r.get("stage_unsafe") or {}):
+    With a score stage, the re-thresholded decision is: any *other live* stage blocked (``blocked_by``:
+    live stages only, on_error already applied — shadow stages never decide), or this stage's score
+    >= threshold (its hard label when it produced no score). A row the stage never judged (``apply_to``,
+    or a short-circuit) keeps its original decision."""
+    if not score_stage:
         return r
-    others = any(v for k, v in (r.get("stage_unsafe") or {}).items() if k != score_stage)
+    if score_stage not in (r.get("stage_unsafe") or {}):
+        return {**r, "score": None, "_others_blocked": bool(pred_of(r)), "_stage_hard": False}
+    blocked_by = r.get("blocked_by")
+    if blocked_by is None:  # legacy rows without blocked_by: fall back to every recorded stage except shadows
+        shadow = set(r.get("shadow_stages") or [])
+        others = any(v for k, v in (r.get("stage_unsafe") or {}).items() if k != score_stage and k not in shadow)
+    else:
+        others = any(st != score_stage for st in blocked_by)
     return {**r, "score": (r.get("stage_scores") or {}).get(score_stage), "_others_blocked": others,
             "_stage_hard": bool(r["stage_unsafe"][score_stage])}
 
@@ -252,6 +261,13 @@ def evaluate_rows(
     y_true = [gold_of(r) for r in scored]
     y_pred = [decide(r, threshold) for r in scored]
     completed = [r for r in rows if pred_of(r) is not None]  # failed rows' latency is not a service latency
+    warnings: list[str] = []
+    if score_stage and not any(score_stage in (r.get("stage_unsafe") or {}) for r in rows):
+        warnings.append(f"metrics.score_stage={score_stage!r} appears in no row (typo, or an endpoint without "
+                        "per-stage detail such as guardrail_api): it had no effect")
+    if threshold is not None and not any(r.get("score") is not None for r in scored):
+        warnings.append("metrics.threshold is set but no row has a score (e.g. endpoint guardrail_api returns "
+                        "decisions only): it had no effect")
     out: dict[str, Any] = {
         "n_total": n_total,
         "n_scored": len(scored),
@@ -319,6 +335,8 @@ def evaluate_rows(
     if tp_rows:
         hit = sum(bool(set(r["gold_categories"]) & set(r.get("categories") or [])) for r in tp_rows)
         out["category_match_rate_on_tp"] = hit / len(tp_rows)
+    if warnings:
+        out["warnings"] = warnings
     return out
 
 

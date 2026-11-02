@@ -96,6 +96,7 @@ class OpenAIGuardBackend(GuardBackend):
         self.timeout = float(cfg.get("timeout", 15))
         self.retries = int(cfg.get("retries", 1))
         self._client: httpx.AsyncClient | None = None
+        self._probe: httpx.AsyncClient | None = None  # readiness probes, separate from the request pool
 
     # -- lifecycle -------------------------------------------------------- #
     async def startup(self) -> None:
@@ -107,23 +108,30 @@ class OpenAIGuardBackend(GuardBackend):
         )
 
     async def ready(self) -> tuple[bool, str]:
-        """The guard model's server answers ``GET /models`` and serves ``self.model``."""
+        """The guard model's server answers ``GET /models`` and serves ``self.model``. Uses its own small
+        client: a request pool saturated by real traffic must not make a healthy vLLM look down."""
         if self._client is None:
             return False, "not started"
+        if self._probe is None:
+            self._probe = httpx.AsyncClient(base_url=self.base_url, timeout=2.0,
+                                            headers={"Authorization": f"Bearer {self.api_key}"})
         try:
-            r = await self._client.get("/models", timeout=min(self.timeout, 5.0))
+            r = await self._probe.get("/models")
         except httpx.HTTPError as e:
             return False, f"{scrub_url(self.base_url)} unreachable: {type(e).__name__}"
         if r.status_code != 200:
             return False, f"{scrub_url(self.base_url)}/models -> HTTP {r.status_code}"
         served = [m.get("id") for m in (r.json().get("data") or []) if isinstance(m, dict)]
-        if served and self.model not in served:
+        if not served:
+            return False, f"{scrub_url(self.base_url)} serves no models"
+        if self.model not in served:
             return False, f"model {self.model!r} not served (server has {served})"
         return True, f"{self.model} @ {scrub_url(self.base_url)}"
 
     async def shutdown(self) -> None:
-        if self._client:
-            await self._client.aclose()
+        for c in (self._client, self._probe):
+            if c is not None:
+                await c.aclose()
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "model": self.model, "parser": self.parser.registry_name,

@@ -235,3 +235,21 @@ async def test_classify_does_not_swallow_interrupts(exc):
     be = build_backend({"name": "clf", "type": "_test_raises", "exc": exc}, {})
     with pytest.raises(type(exc)):
         await be.classify(req("x"))
+
+
+def test_regex_rules_file_resolution_and_missing_file(tmp_path, caplog):
+    import logging
+
+    import pytest
+
+    from src.server.backends import build_backend
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("- {name: codename, pattern: 'PROJECT_ALPHA', category: confidential, action: block}\n")
+    be = build_backend({"type": "regex", "name": "rules", "rules_file": str(rules)}, {})
+    assert be.describe()["rules_file_loaded"] is True and "codename" in be.describe()["rules"]
+    with caplog.at_level(logging.WARNING):
+        missing = build_backend({"type": "regex", "name": "rules", "rules_file": "nope/internal_rules.yaml"}, {})
+    assert missing.describe()["rules_file_loaded"] is False and any("not found" in r.getMessage() for r in caplog.records)
+    with pytest.raises(FileNotFoundError):
+        build_backend({"type": "regex", "name": "rules", "rules_file": "nope.yaml", "rules_file_required": True}, {})

@@ -39,23 +39,33 @@ CONFIG=src/config/server/pipelines/two_stage.yaml PORT=8080 deploy/server/run_se
 
 # 3) 驗收（每次部署 / 改設定後都要跑）
 python -m src.server.check --url http://localhost:8080 --load 200 --concurrency 16
+#   壓測除了延遲，也會檢查負載下決策仍正確、沒有 stage error（fail-open 放行）；/v1/stats 的 errors 有增加就 FAIL
 ```
 
-Docker：`docker build -f deploy/server/Dockerfile -t ojt-guardrail .`，用 `-e CONFIG=... -e GUARDRAIL_API_KEY=... -e GUARD_MODEL_BASE_URL=...` 啟動。
+Docker：
+
+- `docker build -f deploy/server/Dockerfile -t ojt-guardrail .`，啟動時用 `-e CONFIG=... -e GUARDRAIL_API_KEY=... -e GUARD_MODEL_BASE_URL=...` 帶入設定。
+- 預設 image 只能跑 **regex + openai_guard** 的設定，例如 `models/qwen3guard_gen_4b.yaml`。含 `hf_classifier` 的設定（例如 `pipelines/two_stage.yaml`）要用 `--build-arg EXTRAS=hf` 建置；GPU 推論則要改用 CUDA / PyTorch 的 base image。
+- image 以 UID 10001、group 0 執行，在 runAsNonRoot 或任意 UID 的平台上都能寫入 `results/`。唯讀檔案系統可加 `-e SNAPSHOT=0`。
 
 注意事項：
 
 - **一個 process 只跑一個 worker**。stage 會把 model client 或權重放在 process 內，pipeline 本身是 async。要擴充就增加 replica，不要增加 uvicorn worker。
 - **`max_model_len` 必須等於 vLLM 的 `--max-model-len`**。server 依這個值決定截斷預算；設太大，超長輸入會讓 vLLM 回 400。
-- **啟動時會把完整設定寫入 `results/server/<UTC>_<name>_<hash>/config.yaml`**，secrets 只記錄名稱。`config_hash` 也會出現在 `/v1/info`，評測時會記錄下來。
+- **啟動時會把完整設定寫入 `results/server/<UTC>_<name>_<hash>/config.yaml`**，secrets 只記錄名稱。
+- `/v1/info` 會回報兩個 hash：
+  - `pipeline_hash`：只涵蓋會影響決策的部分，也就是 pipeline 加上被引用檔案的內容，**不含** port、log level。兩台設定相同的 replica 會得到相同的值。
+  - `config_hash`：完整設定。
+- 評測用 `pipeline_hash` 加上 git commit 來判斷「是不是同一個 guardrail」。
+- `HOST` / `PORT` / `LOG_LEVEL` 環境變數只有在有設定時，才會覆蓋 YAML 的 `server.*`。
 
 ## 3. Endpoints
 
 | 方法 | 路徑 | auth | 用途 |
 |---|---|---|---|
 | GET | `/health` | 否 | liveness：process 在、pipeline 已啟動 |
-| GET | `/ready` | 否 | readiness：每個 live stage 都能回應（guard 模型的 vLLM 有在跑、而且 serve 的是設定的模型）。不 ready 時回 503；`degraded` 表示有個 `fail_open` 的 stage 掛了，這時流量會**跳過那個 stage 直接放行** |
-| GET | `/v1/info` | 是 | stages、strategy、`config_hash`、git commit、啟動時間 |
+| GET | `/ready` | 否 | readiness：每個 live stage 都能回應（guard 模型的 vLLM 有在跑，`/models` 裡有設定的模型）。不 ready 時回 503；`degraded` 表示有個 `fail_open` 的 stage 掛了，這時流量會**跳過那個 stage 直接放行**。probe 用的是獨立的 connection pool，timeout 2 秒，所以 server 忙碌時不會被誤判成 down |
+| GET | `/v1/info` | 是 | stages（含 `shadow`、`trained_on`、regex 的 `rules_file_loaded`）、strategy、`pipeline_hash`、`config_hash`、git commit、啟動時間 |
 | GET | `/v1/stats` | 是 | 決策計數 |
 | POST | `/beta/litellm_basic_guardrail_api` | 是 | **正式環境 endpoint**，只回決策 |
 | POST | `/v1/classify` | 是 | 同一個 pipeline，回傳每個 stage 的判定與分數（評測 / 除錯用） |
@@ -78,6 +88,7 @@ curl -s localhost:8080/beta/litellm_basic_guardrail_api -H "x-api-key: $GUARDRAI
 | `structured_messages` | 完整對話（request）。server 會判斷最新的 user 訊息（`request_scope`）、client 的 system / developer 訊息，以及最後一則 user 之後的 tool 輸出 |
 | `tool_calls` | 模型或 client 的 tool call（函式名稱 + 參數），會被判斷 |
 | 回應 `action` | `NONE` 放行；`BLOCKED`（附 `blocked_reason`）；`GUARDRAIL_INTERVENED`（附 `texts`：依位置替換成遮罩後的文字，例如 PII） |
+| 回應 header `x-guardrail-stage-errors` | 有 live stage 出錯時才會出現（值為 stage 名稱），表示這次的 action 是由 `on_error` 決定，而不是模型判斷的。呼叫端可以忽略；評測會把這種列當成 error |
 
 除錯用：
 
@@ -101,8 +112,8 @@ curl -s localhost:8080/v1/classify -H "x-api-key: $GUARDRAIL_API_KEY" -H 'conten
 | stage `shadow` | `false` | 只記錄、不影響決策（新模型上線前觀察用，在背景執行，不增加延遲） |
 | stage `threshold` | 0.5 | 有 logprob 分數時用它決定；**用評測的 ROC 來選，不要用預設值** |
 | regex `response_mask_action` | `mask` | 輸出端命中遮罩規則時，`block` 表示直接擋（呼叫端若是 streaming、無法套用遮罩時要用 block） |
-| regex `rules_file` | `policies/internal_rules.yaml` | 內部代號、機密標記；**不要進 git**。pattern 不要用 `\b`（在中文字旁邊不會匹配），改用 `(?<![A-Za-z0-9_])` |
-| openai_guard `base_url_env` | `GUARD_MODEL_BASE_URL` | 部署時的覆寫值，優先於 `base_url` |
+| regex `rules_file` | `src/config/server/policies/internal_rules.yaml` | 內部代號、機密標記；**不要進 git**（從 `internal_rules.example.yaml` 複製）。找不到檔案時只用內建規則，並會記一筆 warning 與 `rules_file_loaded: false`；正式環境請設 `rules_file_required: true`，找不到就拒絕啟動。pattern 不要用 `\b`（在中文字旁邊不會匹配），改用 `(?<![A-Za-z0-9_])` |
+| openai_guard `base_url_env` | 無（preset 都設成 `GUARD_MODEL_BASE_URL`） | 部署時的覆寫值，優先於 `base_url` |
 | openai_guard `max_model_len` | 8192 | 必須等於 vLLM 的 `--max-model-len` |
 
 ## 5. 測試與評測（都直接打 server）
@@ -124,7 +135,9 @@ python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail
 
 1. **啟動前**：打 `/health` 和 `/v1/info`，把 server 的 stages 與 `config_hash` 寫入 `task.json`；送一個 canary（已知的 injection），沒被擋就中止評測。這可以抓出設定錯誤或 stage fail-open。
 2. **評測中**：預設走 `/v1/classify`，`run_all` 開啟，可以拿到每個 stage 的分數（用來做 ROC 與兩階段分析）；`--endpoint guardrail_api` 則走正式 endpoint。transport 失敗或 stage 出錯的列會重試，最後記為 error，**不會被當成 safe**。
-3. **結束後**：再讀一次 `/v1/info`。如果 `config_hash` 和開始時不同（例如 server 中途換了設定重啟），report 會加上警告，因為這次的 predictions 混了兩種設定。
+3. **結束後**：再讀一次 `/v1/info`。如果 `pipeline_hash` 或程式碼版本和開始時不同（例如 server 中途換了設定重啟），report 會加上警告，因為這次的 predictions 混了兩種設定；讀不到 `/v1/info` 時則會另外警告「無法驗證」。`--resume` 遇到不同的 server 會拒絕繼續（加 `--force` 可以強制，但會保留每一段 server 的記錄並標記為已改變）。
+4. **shadow stage** 的判定會留在 `stage_unsafe` 供分析，但不會影響 live 的決策，它出錯也不會讓那一列變成 error。
+5. 走 `--endpoint guardrail_api` 時，server 回應若帶有 `x-guardrail-stage-errors`，那一列會重試並記為 error。這個 endpoint 不提供分數，所以 `--threshold` 和 `metrics.score_stage` 不會生效，report 會發出警告。
 
 本機開發也可以用 `--target inprocess --server-config <yaml>`，不起 server、直接在同一個 process 裡建 pipeline，評測邏輯相同。
 

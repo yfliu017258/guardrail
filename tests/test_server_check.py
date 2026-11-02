@@ -31,3 +31,11 @@ def test_auth_is_checked(tmp_path):
         envf = tmp_path / ".env"
         envf.write_text("GUARDRAIL_API_KEY=k\n")
         assert main(["--url", srv.url, "--env-file", str(envf)]) == 0
+
+
+async def test_load_test_fails_when_a_stage_fails_open_under_load():
+    # every request whose text contains "the" makes the mock stage error -> fail_open -> NONE: must FAIL
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=["pipeline.stages.1.fail_on=the"]) as srv:
+        rep = await run_checks(srv.url, None, BUILTIN_CASES[:3], load=30, concurrency=4)
+    load = [r for r in rep.rows if r[1] == "load"][0]
+    assert load[0] == "FAIL" and "stage_errors=" in load[2] and "stage_errors=0" not in load[2]

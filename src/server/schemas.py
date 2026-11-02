@@ -64,3 +64,4 @@ class ClassifyResponse(BaseModel):
     verdicts: list[dict[str, Any]]
     errors: list[str]
     masked_texts: Optional[list[str]] = None
+    shadow_stages: list[str] = Field(default_factory=list)  # stages whose verdicts are logged but never decide

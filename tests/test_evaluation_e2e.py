@@ -92,3 +92,81 @@ def test_inprocess_target_still_available(tmp_path):
           "--set", "target.inprocess.server_config=[src/config/server/mock.yaml]"])
     (run_dir,) = list(tmp_path.iterdir())
     assert json.loads((run_dir / "metrics.json").read_text())["n_total"] == 30
+
+
+def _rows(run):
+    return [json.loads(l) for l in (run / "predictions.jsonl").open()]
+
+
+@pytest.mark.parametrize("endpoint", ["classify", "guardrail_api"])
+def test_live_stage_errors_are_errors_not_safe_on_both_endpoints(tmp_path, endpoint):
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=["pipeline.stages.1.fail_on=ransomware"]) as srv:
+        run = _eval(srv, tmp_path, "--endpoint", endpoint, "--set", "eval.retries=0")
+    m = json.loads((run / "metrics.json").read_text())
+    errored = [r for r in _rows(run) if r["pred_positive"] is None]
+    assert m["n_errors"] == len(errored) >= 2 and all("ransomware" in r["text_preview"].lower() for r in errored)
+
+
+def test_shadow_stage_errors_and_votes_never_decide(tmp_path):
+    shadow = ["pipeline.stages.2={name: candidate, type: mock, shadow: true, threshold: 0.0, fail_on: bomb}"]
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=shadow) as srv:
+        run = _eval(srv, tmp_path)
+    m = json.loads((run / "metrics.json").read_text())
+    assert m["n_errors"] == 0 and m["n_scored"] == 30                       # a broken candidate breaks no row
+    assert all(r["shadow_stages"] == ["candidate"] or "candidate" not in r["stage_unsafe"] for r in _rows(run))
+    main(["--rescore", str(run), *NOENV, "--set", "metrics.score_stage=mock_guard", "--set", "metrics.threshold=0.99"])
+    (sub,) = [p for p in run.iterdir() if p.name.startswith("rescore_0.99_")]
+    o = json.loads((sub / "metrics.json").read_text())["overall"]
+    assert o["fpr"] == 0.0                     # the candidate flags everything, but it is shadow: it does not block
+
+
+def test_score_stage_and_threshold_warnings(mock_server, tmp_path):
+    run = _eval(mock_server, tmp_path / "api", "--endpoint", "guardrail_api")
+    main(["--rescore", str(run), *NOENV, "--set", "metrics.score_stage=mock_guard", "--threshold", "0.3"])
+    (sub,) = [p for p in run.iterdir() if p.name.startswith("rescore_0.3_")]
+    warnings = json.loads((sub / "metrics.json").read_text())["warnings"]
+    assert any("score_stage" in w for w in warnings) and any("no row has a score" in w for w in warnings)
+
+
+def test_rescore_keeps_contamination_from_the_server(tmp_path):
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=["pipeline.stages.1.trained_on=[smok*]"]) as srv:
+        run = _eval(srv, tmp_path)
+    assert json.loads((run / "metrics.json").read_text())["contamination"]["excluded_sources"] == ["smoke"]
+    main(["--rescore", str(run), *NOENV])
+    (sub,) = [p for p in run.iterdir() if p.name.startswith("rescore_")]
+    assert json.loads((sub / "metrics.json").read_text())["contamination"]["excluded_sources"] == ["smoke"]
+
+
+def test_resume_against_a_different_server_is_refused_and_recorded(tmp_path):
+    with BackgroundServer(["src/config/server/mock.yaml"]) as srv:
+        run = _eval(srv, tmp_path, "--limit", "10")
+    task = json.loads((run / "task.json").read_text())
+    assert task["server_identity"]["pipeline_hash"]
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=["pipeline.strategy=sequential"]) as other:
+        cfg = (run / "config.yaml").read_text().replace(task["base_url"], other.url)
+        (run / "config.yaml").write_text(cfg)
+        with pytest.raises(SystemExit, match="refusing to --resume"):
+            main(["--resume", str(run), *NOENV])
+        main(["--resume", str(run), "--force", *NOENV])
+    task2 = json.loads((run / "task.json").read_text())
+    assert task2["server_changed_during_run"] is True and len(task2["server_segments"]) == 2
+    assert "changed during the run" in (run / "report.md").read_text()
+
+
+def test_identical_replicas_on_other_ports_are_the_same_guardrail(tmp_path):
+    with BackgroundServer(["src/config/server/mock.yaml"]) as a, \
+         BackgroundServer(["src/config/server/mock.yaml"], overrides=["server.port=9999", "server.log_level=debug"]) as b:
+        ia = __import__("httpx").get(f"{a.url}/v1/info").json()
+        ib = __import__("httpx").get(f"{b.url}/v1/info").json()
+    assert ia["pipeline_hash"] == ib["pipeline_hash"] and ia["config_hash"] != ib["config_hash"]
+
+
+def test_guardrail_api_rejects_prompt_context(mock_server, tmp_path):
+    with pytest.raises(ValueError, match="response_context"):
+        _eval(mock_server, tmp_path, "--endpoint", "guardrail_api", "--set", "target.guardrail_server.response_context=prompt")
+
+
+def test_stage_filter_is_what_task_json_reports(mock_server, tmp_path):
+    run = _eval(mock_server, tmp_path, "--set", "target.guardrail_server.stages=[mock_guard]")
+    task = json.loads((run / "task.json").read_text())
+    assert [s["name"] for s in task["stages"]] == ["mock_guard"] and len(task["server_stages"]) == 2

@@ -16,14 +16,17 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 
-from ..config import env, get_by_path
+from ..config import config_hash, env, get_by_path
 from .pipeline import ACTION_BLOCKED, GuardPipeline, PipelineResult
 from .schemas import ClassifyRequest, ClassifyResponse, LiteLLMGuardrailRequest, LiteLLMGuardrailResponse
 
 log = logging.getLogger("guardrail")
+
+#: set on the production endpoint when a live stage errored (its on_error decided instead of the stage)
+STAGE_ERRORS_HEADER = "x-guardrail-stage-errors"
 
 DEFAULT_BLOCK_MESSAGE = (
     "此請求可能違反公司 AI 使用規範（{categories}），已被系統攔截。"
@@ -35,6 +38,8 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
     pipeline = pipeline or GuardPipeline(cfg)
     key_env = get_by_path(cfg, "server.api_key_env")
     expected_key = env(cfg, key_env)
+    if expected_key and not expected_key.isascii():
+        raise RuntimeError(f"{key_env} contains non-ASCII characters; HTTP clients cannot send it reliably in a header")
     if key_env and not expected_key and not get_by_path(cfg, "server.allow_no_auth", False):
         # auth was configured but the secret is missing: refuse to start rather than serve unauthenticated
         raise RuntimeError(f"server.api_key_env={key_env} is set but the variable is empty/missing "
@@ -59,7 +64,7 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
         if not expected_key:
             return
         supplied = x_api_key or (authorization[7:] if authorization and authorization.lower().startswith("bearer ") else None)
-        if not supplied or not hmac.compare_digest(supplied, expected_key):
+        if not supplied or not hmac.compare_digest(supplied.encode("utf-8", "replace"), expected_key.encode("utf-8")):
             raise HTTPException(status_code=401, detail="invalid guardrail api key")
 
     def _log_decision(route: str, call_id: str | None, res: PipelineResult, input_type: str, text: str = "") -> None:
@@ -98,12 +103,17 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
 
     meta = cfg.get("meta", {})
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    live_stages = {s.backend.name for s in pipeline.stages if not s.shadow}
+    # what decides: the pipeline + referenced files' contents, NOT host/port/log level (identical replicas
+    # on different ports must compare equal)
+    pipeline_hash = config_hash({"pipeline": cfg.get("pipeline"), "resolved_files": cfg.get("resolved_files")})
 
     @app.get("/v1/info", dependencies=[Depends(auth)])
     async def info() -> dict[str, Any]:
         """What this server is: evaluations record it, and compare it before/after a run."""
         return {"stages": pipeline.describe(), "strategy": pipeline.strategy, "request_scope": pipeline.request_scope,
-                "config_hash": meta.get("config_hash"), "config_sources": meta.get("config_sources"),
+                "pipeline_hash": pipeline_hash, "config_hash": meta.get("config_hash"),
+                "config_sources": meta.get("config_sources"),
                 "git": meta.get("git"), "started_at": started_at, "version": app.version}
 
     @app.get("/v1/stats", dependencies=[Depends(auth)])
@@ -112,10 +122,15 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
 
     @app.post("/beta/litellm_basic_guardrail_api", response_model=LiteLLMGuardrailResponse,
               response_model_exclude_none=True, dependencies=[Depends(auth)])
-    async def litellm_guardrail(req: LiteLLMGuardrailRequest) -> LiteLLMGuardrailResponse:
+    async def litellm_guardrail(req: LiteLLMGuardrailRequest, response: Response) -> LiteLLMGuardrailResponse:
         inputs = pipeline.build_inputs(req.input_type, req.texts, req.structured_messages, req.tool_calls)
         res = await pipeline.run(inputs, call_id=req.litellm_call_id)  # shadow stages run in the background
         _log_decision("litellm", req.litellm_call_id, res, req.input_type, inputs[0].target_text)
+        errored = sorted({v.stage for v in res.verdicts if v.error and v.stage in live_stages})
+        if errored:
+            # the decision below already applied each stage's on_error; callers ignore this header, but an
+            # evaluation must not score a fail-open pass as a real "safe" decision
+            response.headers[STAGE_ERRORS_HEADER] = ",".join(errored)
         if res.action == ACTION_BLOCKED:
             cats = ", ".join(res.categories) if (expose_categories and res.categories) else "policy"
             return LiteLLMGuardrailResponse(
@@ -154,6 +169,7 @@ def create_app(cfg: dict[str, Any], pipeline: GuardPipeline | None = None) -> Fa
         res = await pipeline.run(inputs, run_all=req.run_all, only=req.stages)
         _log_decision("classify", None, res, req.input_type)
         d = res.to_dict(include_raw=req.include_raw)
+        d["shadow_stages"] = sorted({v.stage for v in res.verdicts} - live_stages)  # verdicts that never decide
         return ClassifyResponse(**{k: d[k] for k in ClassifyResponse.model_fields if k in d})
 
     return app

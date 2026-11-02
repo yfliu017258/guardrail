@@ -144,7 +144,12 @@ def render_markdown(metrics: dict[str, Any], cfg: dict[str, Any], manifest: dict
                       f"{_fmt(co['f1'])} | {_fmt(co['fpr'])} |"]
     if metrics.get("per_stage"):
         full = all((m.get("coverage") or 0) >= 0.999 for m in metrics["per_stage"].values())
-        title = "each stage alone" if full else "CONDITIONAL on reaching the stage (short-circuit) — use run_all for standalone numbers"
+        if target_desc.get("run_all") is False:
+            title = "CONDITIONAL on reaching the stage (short-circuit) — use run_all for standalone numbers"
+        elif full:
+            title = "each stage alone"
+        else:
+            title = "each stage alone, over the rows it applies to (apply_to; coverage < 1 = other input types)"
         lines += ["", f"## Per stage ({title})", "", "| stage | n | coverage | precision | recall | F1 | FPR | AUROC |",
                   "|---|---|---|---|---|---|---|---|"]
         for st, m in metrics["per_stage"].items():

@@ -123,7 +123,36 @@ def _write_json(path: Path, obj) -> None:
 
 
 #: describe() keys that legitimately differ between the start of a run and a resume of it
-_VOLATILE_DESC_KEYS = ("server_info", "server_info_end", "server_changed_during_run")
+#: (server_identity stays: a resume must talk to the same guardrail)
+_VOLATILE_DESC_KEYS = ("server_info", "server_info_end", "server_changed_during_run", "server_config_hash",
+                       "server_segments")
+
+
+def _merge_segments(old: dict | None, desc: dict) -> dict:
+    """A resumed run keeps the history of every server segment it talked to, and stays flagged as changed
+    once any segment differed (a resume must not erase that). ``old`` = task.json before this segment."""
+    if not old or "server_identity" not in desc:
+        return desc
+    segments = list(old.get("server_segments") or [{"start": old.get("server_info"), "end": old.get("server_info_end"),
+                                                    "identity": old.get("server_identity")}])
+    segments.append({"start": desc.get("server_info"), "end": desc.get("server_info_end"),
+                     "identity": desc.get("server_identity")})
+    changed = old.get("server_changed_during_run") is True or desc.get("server_changed_during_run") is True \
+        or len({json.dumps(seg.get("identity"), sort_keys=True) for seg in segments}) > 1
+    return {**desc, "server_segments": segments, "server_changed_during_run": True if changed
+            else desc.get("server_changed_during_run")}
+
+
+def _target_warnings(desc: dict) -> list[str]:
+    """Warnings derived from what the target observed (shared by a run and a rescore of it)."""
+    out = []
+    if desc.get("server_changed_during_run") is True:
+        out.append("the guardrail server changed during the run (pipeline_hash / code differ between start and end, "
+                   "or between resumed segments): predictions mix two configurations")
+    elif desc.get("server_changed_during_run") is None and "server_info_end" in desc:
+        out.append("could not verify the guardrail server at the end of the run "
+                   f"({(desc.get('server_info_end') or {}).get('error', 'no /v1/info')})")
+    return out
 
 
 def _stable(desc: dict) -> dict:
@@ -161,6 +190,9 @@ async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = Fal
     except BaseException:
         await task.shutdown()  # release what startup opened (HTTP clients, models) before reporting the failure
         raise
+    previous = None
+    if resume and (run_dir / "task.json").exists():  # read before this segment overwrites it
+        previous = json.loads((run_dir / "task.json").read_text(encoding="utf-8"))
     try:
         desc = task.describe()
         if resume:
@@ -170,12 +202,12 @@ async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = Fal
         rows = await run_predictions(task, samples, cfg, run_dir / "predictions.jsonl")
     finally:
         await task.shutdown()
-    desc = task.describe()  # again: targets add what they observed at the end (e.g. the server's config hash)
+    desc = task.describe()  # again: targets add what they observed at the end (e.g. the server's identity)
+    if resume:
+        desc = _merge_segments(previous, desc)
     _write_json(run_dir / "task.json", desc)
     metrics = compute_metrics(task, rows)
-    if desc.get("server_changed_during_run"):
-        msg = ("the guardrail server's config_hash changed during the run (restarted with other settings?): "
-               "predictions mix two configurations")
+    for msg in _target_warnings(desc):
         log.error(msg)
         metrics.setdefault("warnings", []).append(msg)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
@@ -225,13 +257,19 @@ def main(argv: list[str] | None = None) -> None:
         desc_path = next((p for p in (run_dir / "task.json", run_dir / "target.json") if p.exists()), None)
         desc = json.loads(desc_path.read_text(encoding="utf-8")) if desc_path else {}
         task = build_task(cfg)  # constructors never touch the network; only startup() does
+        target = getattr(task, "target", None)
+        if target is not None and hasattr(target, "server_info"):  # what the run saw (stages, trained_on)
+            target.server_info = desc.get("server_info") or {}
         settings = {k: cfg.get(k) for k in ("metrics", "eval")}
         th = get_by_path(cfg, "metrics.threshold")
         sub = run_dir / f"rescore_{'default' if th is None else th}_{config_hash(settings)[:8]}"
         sub.mkdir(exist_ok=True)
         dump_config({**cfg, "meta": {**cfg.get("meta", {}), "rescore_of": str(run_dir),
                                      "rescore_overrides": args.overrides, "rescore_args": mapped}}, sub / "config.yaml")
-        write_report(sub, compute_metrics(task, rows), cfg, manifest, desc, rows)
+        metrics = compute_metrics(task, rows)
+        if _target_warnings(desc):
+            metrics.setdefault("warnings", []).extend(_target_warnings(desc))
+        write_report(sub, metrics, cfg, manifest, desc, rows)
         log.info("rescored -> %s", sub)
         return
 

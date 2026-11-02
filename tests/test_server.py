@@ -116,18 +116,24 @@ async def test_ready_is_503_when_the_guard_model_is_down():
                       overrides=["pipeline.stages.0.on_error=fail_closed"])
     pipe = GuardPipeline(cfg)
     be = pipe.stages[0].backend
-    be._client = httpx.AsyncClient(base_url=be.base_url, transport=httpx.MockTransport(lambda r: httpx.Response(503)))
+
+    def probe(handler):  # readiness uses its own client (`_probe`), separate from the request pool
+        be._client = httpx.AsyncClient(base_url=be.base_url)
+        be._probe = httpx.AsyncClient(base_url=be.base_url, transport=httpx.MockTransport(handler))
+
+    probe(lambda r: httpx.Response(503))
     res = await pipe.ready()
     assert not res["ready"] and not res["degraded"] and "503" in res["stages"]["llm_guard"]["detail"]
-    be._client = httpx.AsyncClient(base_url=be.base_url, transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, json={"data": [{"id": "other-model"}]})))
+    probe(lambda r: httpx.Response(200, json={"data": [{"id": "other-model"}]}))
     assert "not served" in (await pipe.ready())["stages"]["llm_guard"]["detail"]
-    be._client = httpx.AsyncClient(base_url=be.base_url, transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, json={"data": [{"id": "Qwen/Qwen3Guard-Gen-4B"}]})))
+    probe(lambda r: httpx.Response(200, json={"data": []}))
+    assert "serves no models" in (await pipe.ready())["stages"]["llm_guard"]["detail"]
+    probe(lambda r: httpx.Response(200, json={"data": [{"id": "Qwen/Qwen3Guard-Gen-4B"}]}))
     assert (await pipe.ready())["ready"]
     cfg2 = load_config(["src/config/server/models/qwen3guard_gen_4b.yaml"], env_file=None)   # fail_open stage
     pipe2 = GuardPipeline(cfg2)
-    pipe2.stages[0].backend._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503)),
-                                                         base_url="http://x")
+    pipe2.stages[0].backend._client = httpx.AsyncClient(base_url="http://x")
+    pipe2.stages[0].backend._probe = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503)),
+                                                        base_url="http://x")
     res2 = await pipe2.ready()
     assert res2["degraded"] and not res2["ready"]
