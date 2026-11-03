@@ -12,7 +12,7 @@
 - **`src/refuse_judge`**：判斷模型回覆是否拒答，有 keyword、llm、qwen3guard_refusal、hf_classifier、cascade、vote 六種。
 - **`src/converters`**：把公開或內部資料集轉成 **只有 `prompt,expected` 兩欄**的 CSV（`processed_data/<資料集>.csv`；`expected` = `block` / `pass` / `mask`），附 manifest，並能凍結版本化的 eval mix（資料夾，每個來源一個 CSV）。
 
-文件：[`docs/server.md`](docs/server.md)（**server 設定指南**）· [`docs/refactor/README.md`](docs/refactor/README.md)（**重構指南**：目標架構、config 系統、遷移步驟）· [`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
+文件：[`docs/server.md`](docs/server.md)（**server 設定指南**）· [`docs/refactor/README.md`](docs/refactor/README.md)（**重構指南**：目標架構、config 系統、遷移步驟）· [`docs/plan.md`](docs/plan.md) · [`docs/datasets.md`](docs/datasets.md) · [`docs/prompt_injection_data.md`](docs/prompt_injection_data.md)（**PI 評測資料建議**） · [`docs/models.md`](docs/models.md) · [`docs/architecture.md`](docs/architecture.md)（§5：Registry 與類別階層）· [`docs/model_safety.md`](docs/model_safety.md)
 
 所有可擴充元件（converters、guard backends / parsers / prompt builders、evaluation tasks / targets / generators、refusal judges）都是註冊在同一個 `Registry` 的類別。新增功能 = 寫一個 subclass + 一行 `@REG.register("name")`。
 

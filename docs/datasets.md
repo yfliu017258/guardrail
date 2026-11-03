@@ -12,6 +12,7 @@
 | 內容安全（zh-CN + en，含 response/refusal） | `ToxicityPrompts/PolyGuardPrompts` test | `polyguard_prompts` | CC-BY-4.0 ✅ | 會過濾「翻譯器拒答」被誤標成 harmful 的列 |
 | 內容安全（en，最佳 response/refusal） | `allenai/wildguardmix` (WildGuardTest 1,725) | `wildguardtest` | ODC-BY，**gated** | 取得權限後確認 config 名稱 |
 | 真實流量 FPR | `lmsys/toxic-chat` toxicchat0124 | `toxic_chat` | **CC-BY-NC** ⚠️ | 預設關閉，需法務確認 |
+| **Prompt injection 詳細建議** | 見 [`docs/prompt_injection_data.md`](prompt_injection_data.md)：deepset / neuralchemy / Eric12132 的審核結果、indirect / zh-TW / hard negatives / 變體的建議清單、污染對照表 | | | |
 | Prompt injection（一站式） | `Horizon-Labs/prompt-injection-eval-suite`（16 configs） | `pi_eval_suite` | 各 config 不同 | 含 direct、indirect（BIPIA / PIArena / LLMail）；`synthetic_*` 是發布者自家分佈。**預設不載入 `notinject` / `xstest` / `orbench_hard`**：它們是以 injection 為軸的標籤（有害但沒有 override 的請求 = 0），和我們專用的 content-safety converter 互相矛盾；mix 的 manifest 會列出 `label_conflicts` |
 | Injection 邊界對 | `3nesdeniz/agentic-prompt-injection-boundary-pairs` | `boundary_pairs` | CC-BY-4.0 | 同詞彙的 benign/attack 成對 → 測關鍵字誤擋 |
 | Over-defense | `leolee99/NotInject`（339） | `notinject` | MIT | 全部 safe，量 FPR |
