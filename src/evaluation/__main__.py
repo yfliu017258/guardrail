@@ -275,7 +275,14 @@ async def _run_inner(cfg: dict, run_dir: Path, resume: bool, force: bool) -> Non
         metrics.setdefault("warnings", []).append(msg)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
     o = metrics["overall"]
-    write_run_json(run_dir, cfg, "completed", n_scored=metrics.get("n_scored"), n_total=metrics.get("n_total"),
+    blocked = sum(1 for r in rows if r.get("blocked"))
+    if blocked and getattr(task, "on_blocked", None) == "error":
+        msg = (f"{blocked} request(s) were blocked by a guardrail in front of the model and are excluded: "
+               "this is not a pure bare-model run (use a LiteLLM key without guardrails)")
+        log.error(msg)
+        metrics.setdefault("warnings", []).append(msg)
+        write_report(run_dir, metrics, cfg, manifest, desc, rows)
+    write_run_json(run_dir, cfg, "completed", subject=task.subject(), n_scored=metrics.get("n_scored"), n_total=metrics.get("n_total"),
                    has_scores=any(r.get("score") is not None for r in rows), warnings=metrics.get("warnings") or [])
     log.info("done [%s]: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", task.registry_name, o["n"], o["precision"],
              o["recall"], o["f1"], o["fpr"], run_dir)

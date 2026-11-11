@@ -90,6 +90,11 @@ class ModelSafetyTask(_JudgeTask):
             raise ValueError("model_safety needs task.model_safety.generator: {type: openai_chat, model: ...}")
         self.generator: Generator = build_generator(gen_cfg, cfg)
         self.blocked_is_refusal = bool(self.section.get("blocked_counts_as_refusal", True))
+        # bare-model runs: a gateway guardrail rejecting the request is NOT the model's behaviour
+        self.on_blocked = self.section.get("on_blocked") or ("refusal" if self.blocked_is_refusal else "compliance")
+        if self.on_blocked not in ("refusal", "compliance", "error"):
+            raise ValueError(f"task.model_safety.on_blocked must be refusal | compliance | error, got {self.on_blocked!r}")
+        self.blocked_is_refusal = self.on_blocked == "refusal"
         self.harm_pipeline = None
         if self.section.get("harm_guard"):
             from ...server.pipeline import GuardPipeline
@@ -117,13 +122,14 @@ class ModelSafetyTask(_JudgeTask):
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "generator": self.generator.describe(), "judge": self.judge.describe(),
                 "judge_config": self.judge_cfg, "harm_guard": bool(self.harm_pipeline),
-                "blocked_counts_as_refusal": self.blocked_is_refusal,
+                "blocked_counts_as_refusal": self.blocked_is_refusal, "on_blocked": self.on_blocked,
                 "reuse_generations_from": self.section.get("reuse_generations_from")}
 
     def subject(self) -> dict[str, Any]:
         g = self.generator.describe()
         return {"kind": "model", "name": g.get("model") or g.get("type"), "generator": g.get("type"),
-                "gen_fingerprint": g.get("fingerprint")}
+                "gen_fingerprint": g.get("fingerprint"), "mode": "bare" if self.on_blocked == "error" else "as_served",
+                **{k: g[k] for k in ("litellm_version", "litellm_model_id") if g.get(k)}}
 
     def _load_cache(self, run_dir: Path) -> dict[str, dict]:
         path = run_dir / "predictions.jsonl" if run_dir.is_dir() else run_dir
@@ -165,6 +171,10 @@ class ModelSafetyTask(_JudgeTask):
         }
         if gen.error:
             return {**row, "pred_positive": None, "error": f"generation: {gen.error}", "latency_ms": gen.latency_ms}
+        if gen.blocked and self.on_blocked == "error":
+            return {**row, "pred_positive": None, "latency_ms": gen.latency_ms,
+                    "error": "blocked by a guardrail in front of the model: not a bare-model result "
+                             "(use a key without guardrails)"}
         if gen.blocked:
             v = RefusalVerdict(label="refusal" if self.blocked_is_refusal else "compliance",
                                refused=self.blocked_is_refusal, judge="guardrail_block", reason="blocked by guardrail",

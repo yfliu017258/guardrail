@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 data = ["datasets>=2.19", "huggingface_hub>=0.23"]
 hf = ["torch>=2.2", "transformers>=4.44"]
+app = ["streamlit>=1.40", "plotly>=5.20"]   # interactive analysis: streamlit run src/analysis/app.py
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [build-system]

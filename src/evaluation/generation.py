@@ -108,6 +108,9 @@ class OpenAIChatGenerator(Generator):
             raise ValueError("generator needs base_url or base_url_env")
         self.api_key = env(self.root_cfg, cfg.get("api_key_env"), "EMPTY")
         self.model = cfg["model"]
+        if str(self.model).upper().startswith("REPLACE-WITH"):
+            raise ValueError(f"generator model is still the placeholder {self.model!r}; "
+                             "set it with --set task.model_safety.generator.model=<alias>")
         self.timeout = float(cfg.get("timeout", 180))
         self.blocked_status = set(cfg.get("blocked_status_codes", [400]))
         self.blocked_markers = [m.lower() for m in cfg.get("blocked_markers", ["guardrail", "blocked", "violat", "攔截"])]
@@ -137,6 +140,9 @@ class OpenAIChatGenerator(Generator):
         body.update(self.cfg.get("extra_body") or {})
         return body
 
+    def observe(self, r: httpx.Response) -> None:
+        """Hook: record facts about the endpoint from a successful response (see ``litellm_chat``)."""
+
     async def generate(self, prompt: str) -> Generation:
         assert self._client is not None, "startup() not called"
         t0 = time.perf_counter()
@@ -152,6 +158,7 @@ class OpenAIChatGenerator(Generator):
             raise TargetError(f"HTTP {r.status_code}: {r.text[:200]}")
         if r.status_code != 200:
             return Generation(text="", latency_ms=ms, error=f"HTTP {r.status_code}: {r.text[:300]}")
+        self.observe(r)
         data = r.json()
         choice = data["choices"][0]
         msg = choice.get("message") or {}
@@ -159,6 +166,38 @@ class OpenAIChatGenerator(Generator):
         text, reasoning = split_reasoning(msg.get("content") or "", reasoning)
         return Generation(text=text, reasoning=reasoning, finish_reason=choice.get("finish_reason"),
                           latency_ms=ms, usage=data.get("usage") or {})
+
+
+@GENERATORS.register("litellm_chat")
+class LiteLLMChatGenerator(OpenAIChatGenerator):
+    """The model behind a LiteLLM proxy (``/v1/chat/completions``, ``model`` = the proxy's model alias).
+
+    For a BARE-model measurement the key must have no guardrail attached: a request the proxy's guardrail
+    rejects comes back ``blocked`` and, with ``task.model_safety.on_blocked: error`` (set by
+    ``model_safety_litellm.yaml``), is recorded as an error instead of being counted as a refusal.
+    The proxy's version and the deployment that answered are read from its response headers and stored
+    with the run.
+    """
+
+    HEADERS = {"x-litellm-version": "litellm_version", "x-litellm-model-id": "litellm_model_id",
+               "x-litellm-model-api-base": "litellm_model_api_base"}
+
+    def __init__(self, cfg: dict[str, Any], root_cfg: dict[str, Any] | None = None):
+        super().__init__(cfg, root_cfg)
+        self.observed: dict[str, str] = {}
+
+    def observe(self, r: httpx.Response) -> None:
+        for header, key in self.HEADERS.items():
+            if r.headers.get(header):
+                self.observed.setdefault(key, r.headers[header])
+
+    def describe(self) -> dict[str, Any]:
+        from ..config import scrub_url
+
+        out = {**super().describe(), **self.observed}
+        if out.get("litellm_model_api_base"):
+            out["litellm_model_api_base"] = scrub_url(out["litellm_model_api_base"])
+        return out
 
 
 @GENERATORS.register("mock")

@@ -1,0 +1,34 @@
+# BARE-model refusal rate through a LiteLLM proxy (1.98), judged by Qwen3Guard-Gen (also via LiteLLM).
+#   LITELLM_BASE_URL=http://litellm:4000/v1  LITELLM_API_KEY=sk-...   (a key WITHOUT guardrails)
+#   python -m src.evaluation --config src/config/evaluation/model_safety_litellm.yaml \
+#       --set task.model_safety.generator.model=<model alias> --set task.model_safety.judge.model=<qwen3guard alias> \
+#       --data processed_data/mixes/core_v1/ --run-name <model alias>
+# Re-judge without regenerating: --set task.model_safety.reuse_generations_from=results/<previous run>
+_base_: model_safety.yaml
+run:
+  name: model-safety-litellm
+task:
+  type: model_safety
+  model_safety:
+    on_blocked: error                   # bare model: a guardrail block is a setup error, never a refusal
+    generator:
+      type: litellm_chat
+      base_url_env: LITELLM_BASE_URL    # .../v1
+      api_key_env: LITELLM_API_KEY
+      model: REPLACE-WITH-MODEL-ALIAS    # the LiteLLM model alias of the model under test
+      system_prompt: null
+      temperature: 0.0
+      max_tokens: 1024
+      seed: 42
+    judge_config: null
+    judge:
+      type: qwen3guard_refusal          # reads `Refusal: Yes|No` (no partial class)
+      base_url_env: LITELLM_BASE_URL
+      api_key_env: LITELLM_API_KEY
+      model: REPLACE-WITH-QWEN3GUARD-ALIAS   # the LiteLLM alias of Qwen3Guard-Gen
+      max_tokens: 64
+      temperature: 0.0
+      logprobs: true                    # best effort: switched off automatically if the proxy rejects it
+      top_logprobs: 5
+      timeout: 60
+      retries: 2

@@ -6,7 +6,7 @@ run:
 
 env_passthrough: [GUARDRAIL_API_KEY, GUARDRAIL_SERVER_URL, GUARD_MODEL_BASE_URL, VLLM_API_KEY, HF_TOKEN,
                   MODEL_BASE_URL, MODEL_API_KEY, JUDGE_BASE_URL, JUDGE_API_KEY,
-                  GUARDRAIL_SERVICE_URL, GUARDRAIL_SERVICE_API_KEY]
+                  GUARDRAIL_SERVICE_URL, GUARDRAIL_SERVICE_API_KEY, LITELLM_BASE_URL, LITELLM_API_KEY]
 
 task:
   type: guardrail            # guardrail | model_safety | refusal_judge   (python -m src.evaluation --list)

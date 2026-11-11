@@ -1,7 +1,7 @@
 # Evaluation 流程計劃：Guardrail service、模型拒絕率、互動式分析
 
 > 基準版本：**LiteLLM 1.98**（wire format 已對照 1.98.1 原始碼 `litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`）。
-> 進度：**Phase 1、2 已實作**（results 契約、adapter 層、request / response 兩個方向）；Phase 3、4 尚未實作。已確認的決定見 §8。
+> 進度：**Phase 1–4 已實作**，並以真實的 LiteLLM 1.98.1 proxy 做過整套測試（§10）。已確認的決定見 §8，用法見 §9。
 
 ## 1. 目標與範圍
 
@@ -202,7 +202,7 @@ Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 �
 | 判斷模型 | `qwen3guard_refusal`（讀 Qwen3Guard-Gen 的 `Refusal: Yes/No`） | 沒有 partial 類別，部分配合的回覆會被歸到其中一邊；仍建議抽 100–200 筆人工核對 |
 | App | Streamlit 可用 | 照 §6 |
 | 評測方向 | 以 request 為主，response 也要支援 | 已實作：資料多一個可選欄位 `response`，`--input-type response` 時送 `texts=[response]` |
-| `bare` 與 `end_to_end` | 待決定（差異見下） | 影響 Phase 3 的預設值 |
+| `bare` 與 `end_to_end` | 只量 `bare`（模型本身，不經過 guardrail） | `model_safety_litellm.yaml` 設 `on_blocked: error`：請求若被 LiteLLM 上的 guardrail 擋下，該筆記為錯誤並在結果中警告，不會算成拒絕 |
 
 ### `bare` 與 `end_to_end` 的差異
 
@@ -217,18 +217,59 @@ Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 �
 
 兩者不是二選一。**建議以 `bare` 為主**：它加上 guardrail 的直打評測，就能在 app 的「Guardrail × 模型」頁以 `sample_id` 合併，離線算出 end-to-end 的結果，而且能分辨每一筆是誰擋的。`end_to_end` 則用小樣本（幾百筆）跑一次做驗證：若實測與離線合併的結果不一致，代表 LiteLLM 上的設定（mode、`default_on`、fail-open）有問題。
 
-## 9. 使用方式（已實作的部分）
+## 9. 使用方式
 
 ```bash
-# request 方向：評測任一個講 LiteLLM 格式的 guardrail service
+uv pip install -e ".[dev,app]"
+
+# 1) Guardrail service（request 方向）
 python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml \
     --service-url http://my-guardrail:8080 --data processed_data/mixes/core_v1/ --run-name my-guardrail
 
-# response 方向：資料為 prompt,expected,response 三欄
+# 2) 模型拒絕率（bare，經 LiteLLM；判斷模型為 Qwen3Guard，也經 LiteLLM）
+#    .env：LITELLM_BASE_URL=http://litellm:4000/v1、LITELLM_API_KEY=<不掛 guardrail 的 key>
+python -m src.evaluation --config src/config/evaluation/model_safety_litellm.yaml \
+    --set task.model_safety.generator.model=<模型 alias> --set task.model_safety.judge.model=<qwen3guard alias> \
+    --data processed_data/mixes/core_v1/ --run-name <模型 alias>
+
+# 3) Guardrail service（response 方向）：先把模型 run 的回覆轉成 prompt,expected,response
+python -m src.analysis.responses results/<模型 run> -o processed_data/responses/<模型>.csv
 python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml \
-    --service-url http://my-guardrail:8080 --input-type response --data processed_data/responses/
+    --service-url http://my-guardrail:8080 --input-type response --data processed_data/responses/<模型>.csv
+
+# 4) 互動式分析
+streamlit run src/analysis/app.py -- --results results/
 ```
 
-- API key 放在 `.env` 的 `GUARDRAIL_SERVICE_API_KEY`，以 `x-api-key` 送出（與 LiteLLM 相同）。
+- Guardrail 的 API key 放在 `.env` 的 `GUARDRAIL_SERVICE_API_KEY`，以 `x-api-key` 送出（與 LiteLLM 相同）。
 - 開跑前會送一筆 canary；service 的政策不擋 prompt injection 時，請設 `target.http_guardrail.canary_text`。
+- 第 3 步的標記是推定的：「該拒絕的 prompt 而模型沒有拒絕」的回覆標為 `block`，其餘為 `pass`。沒拒絕不一定等於內容有害，`block` 的列建議人工看過。
+- 換判斷模型不必重新產生回覆：`--set task.model_safety.reuse_generations_from=results/<先前的 run>`。
 - 其他 service：在 `src/evaluation/adapters.py` 仿照 `GenericGuardrailAPIAdapter` 寫一個 subclass 並註冊，範例見 `tests/test_adapters.py::test_custom_adapter_is_one_class`。
+
+### App 的頁面
+
+| 頁面 | 回答的問題 |
+|---|---|
+| 總覽 | 所有 run 的 recall、FPR、錯誤率、p50 / p95 latency（含 95% 信賴區間） |
+| Run 詳情 | 單一 run 的 expected × action 矩陣、source / language 切片、可篩選的樣本表與完整內容 |
+| Run 比較 | **不同 guardrail（或不同模型）的差異**：指標並排、latency 分佈、兩兩之間「只有 A 擋到／只有 B 誤擋」的樣本 |
+| 模型 × Guardrail | **特定模型加上某個 guardrail 的收益與代價**：殘餘風險下降多少、正常請求可用率變化、端到端 latency 增加多少，並可點進各類樣本 |
+| Latency | 各 run 的 p50 / p90 / p95 / p99、累積分佈、依判定結果與 prompt 長度的拆解 |
+
+「模型 × Guardrail」是把兩份 run 以 `sample_id` 離線合併：被 guardrail 擋下的請求不會送到模型，latency 只計 guardrail；其餘為 guardrail + 模型。這個 latency 是兩段時間相加，不含 LiteLLM 呼叫 guardrail 的額外開銷。
+
+## 10. 整套測試的紀錄
+
+環境：真實的 LiteLLM 1.98.1 proxy；proxy 後面是一個假的 OpenAI 相容上游（一個會拒絕部分 prompt 的模型，以及一個照 Qwen3Guard 格式回答的判斷模型）；兩個設定不同的本 repo mock guardrail server（B 少了幾類規則、多一條會誤擋的規則、並加 120 ms 延遲）。資料為 `processed_data/samples/smoke.csv`（27 筆）。
+
+| 檢查項目 | 結果 |
+|---|---|
+| Guardrail A、B 的 request 方向評測 | 通過；B 因為不擋預設的 canary 而被中止，改設 `canary_text` 後通過（canary 機制如預期運作） |
+| 經 LiteLLM 的模型拒絕率 + Qwen3Guard 判斷 | 通過；`run.json` 記錄到 `litellm_version: 1.98.1` |
+| bare 模式的保護 | 強制在請求上掛 guardrail 後，12 筆被擋的請求記為錯誤並出現警告，沒有被算成拒絕 |
+| 真實 LiteLLM 呼叫本 repo 的 guardrail server | 通過（`guardrails: [...]` 的請求回 HTTP 400 與 `blocked_reason`） |
+| 模型回覆 → response 方向資料 → 兩個 guardrail 的 response 評測 | 通過 |
+| App 五個頁面 | 以瀏覽器實際開啟並截圖檢查，無例外 |
+
+沒有驗證到的部分：真實的 guardrail service、真實的 Qwen3Guard（判斷品質與 logprobs 經 LiteLLM 是否可用）、大量資料下 app 的速度。
