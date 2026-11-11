@@ -68,6 +68,9 @@ python -m src.server.check --url http://localhost:8080 --load 200     # 驗收�
 python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/ --run-name qwen3guard-4b
 python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api --data ...    # 走正式 endpoint
 
+# 4a) 任一個 guardrail service（透過 adapter；預設為 LiteLLM generic guardrail API，見 docs/eval_pipeline_plan.md）
+python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml --service-url http://my-guardrail:8080 --data ...
+
 # 4b) 裸模型安全（見 docs/model_safety.md）
 python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
 python -m src.evaluation --list                                                        # 所有 task / target / generator / judge
@@ -94,6 +97,7 @@ python -m src.evaluation \
 
 | 檔案 | 內容 |
 |---|---|
+| `run.json` | 分析 app 的索引：`schema_version`、狀態、評測對象、資料集識別碼 |
 | `config.yaml` | 完整解析後 config（含 meta：git sha、argv、套件版本）＋ config_hash |
 | `data_manifest.json` | 每個資料檔的 sha256、使用列數、取樣 seed、標籤/語言分佈 |
 | `environment.json` | `pip freeze` |

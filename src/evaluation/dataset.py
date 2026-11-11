@@ -26,11 +26,12 @@ class EvalSample:
     source: str
     sample_id: str = ""
     language: str = field(default="", compare=False)
+    response: str | None = field(default=None, compare=False)  # a model answer (response-direction data)
 
     @classmethod
-    def build(cls, prompt: str, expected: str, source: str, key: str) -> "EvalSample":
+    def build(cls, prompt: str, expected: str, source: str, key: str, response: str | None = None) -> "EvalSample":
         return cls(prompt=prompt, expected=expected, source=source, sample_id=f"{source}:{key}",
-                   language=detect_language(prompt))
+                   language=detect_language(prompt), response=response)
 
     @property
     def should_block(self) -> bool:
@@ -139,7 +140,7 @@ def load_eval_set(cfg: dict[str, Any]) -> tuple[list[EvalSample], dict[str, Any]
         if sources and source not in sources:
             continue
         raw = read_csv(path)
-        rows = [EvalSample.build(s.prompt, s.expected, source, s.key) for s in raw]
+        rows = [EvalSample.build(s.prompt, s.expected, source, s.key, s.response) for s in raw]
         for r in rows:  # predictions are keyed by sample_id: one prompt, one expectation per source
             if seen.setdefault(r.sample_id, r.expected) != r.expected:
                 raise ValueError(f"{path}: the same prompt appears with expected={seen[r.sample_id]} and {r.expected}")

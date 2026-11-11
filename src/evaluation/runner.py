@@ -126,5 +126,7 @@ def _sample_fields(s: EvalSample) -> dict[str, Any]:
         "source": s.source,
         "language": s.language,
         "expected": s.expected,
+        "prompt": s.prompt,  # full text: the results directory is self-contained for the analysis app
+        **({"response": s.response} if s.response is not None else {}),
         "text_preview": s.prompt[:300],
     }

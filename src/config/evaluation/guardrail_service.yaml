@@ -1,0 +1,26 @@
+# Evaluate ANY guardrail service over HTTP. The service is reached through an adapter
+# (src/evaluation/adapters.py); the default one speaks the LiteLLM 1.98 generic guardrail API:
+#   POST <base_url>/beta/litellm_basic_guardrail_api  ->  {action, texts, blocked_reason}
+#
+#   python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml \
+#       --service-url http://my-guardrail:8080 --data processed_data/mixes/core_v1/ --run-name my-guardrail
+#   ... --input-type response --data processed_data/responses/     # judge model answers (prompt,expected,response)
+_base_: default.yaml
+run:
+  name: guardrail-service
+target:
+  type: http_guardrail
+  http_guardrail:
+    adapter:
+      type: generic_guardrail_api
+      litellm_version: "1.98.1"       # sent as litellm_version, as the proxy would
+      # model: my-model-alias         # sent as `model` if the service decides per model
+      # additional_provider_specific_params: {}
+    base_url_env: GUARDRAIL_SERVICE_URL
+    api_key_env: GUARDRAIL_SERVICE_API_KEY   # sent as x-api-key (what LiteLLM does); null = no auth
+    input_type: request
+    canary: true                      # one text that must be BLOCKED before any number is reported
+    # canary_text: "..."              # set it when the default injection canary is outside this service's policy
+    # headers: {}                     # extra static headers
+metrics:
+  slice_by: [source, language]

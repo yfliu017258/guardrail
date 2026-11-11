@@ -1,7 +1,7 @@
 # Evaluation 流程計劃：Guardrail service、模型拒絕率、互動式分析
 
 > 基準版本：**LiteLLM 1.98**（wire format 已對照 1.98.1 原始碼 `litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`）。
-> 本文件是計劃，尚未實作。現有程式碼能沿用的部分會標示「沿用」，要新增的標示「新增」。
+> 進度：**Phase 1、2 已實作**（results 契約、adapter 層、request / response 兩個方向）；Phase 3、4 尚未實作。已確認的決定見 §8。
 
 ## 1. 目標與範圍
 
@@ -193,11 +193,42 @@ target:
 
 Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 與 3 互不依賴，可以平行。
 
-## 8. 待確認
+## 8. 已確認的決定
 
-1. **Adapter 的位置**：你的 service 是「已經直接回 generic guardrail API 格式」，還是「有原生 API，需要評測端轉換」？前者用內建 adapter 即可；後者請提供一組原生 request / response 範例。
-2. **是否能拿到分數**：service 只回 `action`，還是能回 `score`？沒有分數就沒有 ROC 與 threshold 分析。
-3. **LiteLLM 上的 guardrail 設定**：模型拒絕率要量 `bare`、`end_to_end`，還是兩者都要？是否有不掛 guardrail 的 key？
-4. **判斷模型**：用哪一個模型（LiteLLM alias）？是否有人力標註 100–200 筆做驗證？
-5. **App 的部署方式**：Streamlit 在內網可否安裝？若只能交付靜態檔，改為輸出單一 HTML 報表（篩選、樣本瀏覽、比較仍可保留，但資料量大時會變慢）。
-6. **評測方向**：只評 request（使用者輸入），還是也要評 response（模型輸出）？後者需要含回覆的資料集。
+| 題目 | 決定 | 對計劃的影響 |
+|---|---|---|
+| Service 的格式 | 直接回 LiteLLM generic guardrail API 格式 | 用內建的 `generic_guardrail_api` adapter，不必寫程式 |
+| 是否有分數 | 只回 `action` | 沒有 ROC、recall@FPR、threshold 分析；app 只顯示點估計（recall / FPR / F1 與 CI）。要比較不同嚴格度，只能請 service 換設定後各跑一次 |
+| 判斷模型 | `qwen3guard_refusal`（讀 Qwen3Guard-Gen 的 `Refusal: Yes/No`） | 沒有 partial 類別，部分配合的回覆會被歸到其中一邊；仍建議抽 100–200 筆人工核對 |
+| App | Streamlit 可用 | 照 §6 |
+| 評測方向 | 以 request 為主，response 也要支援 | 已實作：資料多一個可選欄位 `response`，`--input-type response` 時送 `texts=[response]` |
+| `bare` 與 `end_to_end` | 待決定（差異見下） | 影響 Phase 3 的預設值 |
+
+### `bare` 與 `end_to_end` 的差異
+
+| | `bare` | `end_to_end` |
+|---|---|---|
+| 請求路徑 | LiteLLM → 模型（不經過 guardrail） | LiteLLM → guardrail → 模型 →（guardrail）→ 回覆 |
+| 量到的是 | 模型本身會不會拒絕 | 使用者實際上拿不拿得到有害回覆 |
+| 「擋下」的來源 | 只有模型的拒絕 | guardrail 攔截 + 模型拒絕，兩者分開記錄 |
+| 換 guardrail 設定後 | 數字不變 | 數字會變 |
+| 需要的條件 | 一把不掛 guardrail 的 key | 正式設定即可 |
+| 能回答的問題 | 「這個模型安全嗎？要不要換模型？」 | 「整個系統上線後的殘餘風險是多少？LiteLLM 的整合有沒有設對？」 |
+
+兩者不是二選一。**建議以 `bare` 為主**：它加上 guardrail 的直打評測，就能在 app 的「Guardrail × 模型」頁以 `sample_id` 合併，離線算出 end-to-end 的結果，而且能分辨每一筆是誰擋的。`end_to_end` 則用小樣本（幾百筆）跑一次做驗證：若實測與離線合併的結果不一致，代表 LiteLLM 上的設定（mode、`default_on`、fail-open）有問題。
+
+## 9. 使用方式（已實作的部分）
+
+```bash
+# request 方向：評測任一個講 LiteLLM 格式的 guardrail service
+python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml \
+    --service-url http://my-guardrail:8080 --data processed_data/mixes/core_v1/ --run-name my-guardrail
+
+# response 方向：資料為 prompt,expected,response 三欄
+python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml \
+    --service-url http://my-guardrail:8080 --input-type response --data processed_data/responses/
+```
+
+- API key 放在 `.env` 的 `GUARDRAIL_SERVICE_API_KEY`，以 `x-api-key` 送出（與 LiteLLM 相同）。
+- 開跑前會送一筆 canary；service 的政策不擋 prompt injection 時，請設 `target.http_guardrail.canary_text`。
+- 其他 service：在 `src/evaluation/adapters.py` 仿照 `GenericGuardrailAPIAdapter` 寫一個 subclass 並註冊，範例見 `tests/test_adapters.py::test_custom_adapter_is_one_class`。

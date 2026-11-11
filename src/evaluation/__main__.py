@@ -8,13 +8,17 @@ Tasks (``task.type``, registry ``TASKS``):
     python -m src.evaluation --config src/config/evaluation/smoke.yaml
     python -m src.evaluation --config src/config/evaluation/smoke_model_safety.yaml
 
-Data: CSV files with exactly two columns, ``prompt,expected`` (block | pass | mask); the file name is the
-source. ``--data`` takes files, globs or directories (a mix).
+Data: CSV files with the columns ``prompt,expected`` (block | pass | mask; optionally ``response``); the file
+name is the source. ``--data`` takes files, globs or directories (a mix).
 
     # guardrail: evaluate a RUNNING guardrail server (python -m src.server --config ...)
     python -m src.evaluation --server-url http://localhost:8080 --data processed_data/mixes/core_v1/ \
         --run-name qwen3guard4b
     python -m src.evaluation --server-url http://localhost:8080 --endpoint guardrail_api ...   # production endpoint
+
+    # guardrail: ANY guardrail service through an adapter (default: LiteLLM generic guardrail API)
+    python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml --service-url http://svc:8080
+    python -m src.evaluation --config src/config/evaluation/guardrail_service.yaml --input-type response --data ...
 
     # bare model: Qwen3.6-27B with a cascade refusal judge
     python -m src.evaluation --config src/config/evaluation/model_safety.yaml src/config/models/qwen3_6_27b.yaml
@@ -24,7 +28,7 @@ source. ``--data`` takes files, globs or directories (a mix).
     python -m src.evaluation --rescore results/<run_dir> --set metrics.threshold=0.3
 
 Every run writes ``results/<UTC>_<name>_<config_hash>/``: config.yaml (secrets redacted) · data_manifest.json ·
-environment.json · task.json · predictions.jsonl · metrics.json · slices.csv · errors.csv · report.md
+environment.json · run.json · task.json · predictions.jsonl · metrics.json · slices.csv · errors.csv · report.md
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ ARG_TO_KEY = {
     "server_config": "target.inprocess.server_config",
     "server_url": "target.guardrail_server.base_url",
     "endpoint": "target.guardrail_server.endpoint",
+    "service_url": "target.http_guardrail.base_url",
+    "input_type": "target.http_guardrail.input_type",
     "concurrency": "eval.concurrency",
     "limit": "eval.limit",
     "threshold": "metrics.threshold",
@@ -84,6 +90,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--server-url", default=None, help="guardrail server base URL (guardrail_server target)")
     p.add_argument("--endpoint", default=None, choices=["classify", "guardrail_api"],
                    help="guardrail_server: /v1/classify (per-stage detail) or the production endpoint")
+    p.add_argument("--service-url", default=None, help="guardrail service base URL (http_guardrail target)")
+    p.add_argument("--input-type", default=None, choices=["request", "response"],
+                   help="http_guardrail: judge the user prompt, or the model answer (needs a `response` column)")
     p.add_argument("--server-config", nargs="+", default=None, help="server YAML(s) for the inprocess target")
     p.add_argument("--concurrency", type=int, default=None)
     p.add_argument("--threshold", type=float, default=None, help="re-threshold the score")
@@ -178,7 +187,60 @@ def _check_resume(run_dir: Path, manifest: dict, desc: dict, force: bool) -> Non
         raise SystemExit("refusing to --resume: " + "; ".join(problems) + ". Start a new run, or pass --force.")
 
 
+#: version of the results contract (run.json + predictions.jsonl + metrics.json) the analysis app reads
+RESULTS_SCHEMA_VERSION = 1
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _dataset_summary(manifest: dict) -> dict:
+    """One identity for the eval set: runs are comparable sample-by-sample only when ``sha256`` matches."""
+    import hashlib
+
+    files = manifest.get("files", [])
+    ident = json.dumps([[f["source"], f["sha256"], f["rows_used"]] for f in files] + [manifest.get("n_samples")])
+    parents = {str(Path(f["path"]).parent.name) for f in files}
+    name = parents.pop() if len(parents) == 1 and len(files) > 1 else "+".join(f["source"] for f in files)
+    return {"name": name, "n": manifest.get("n_samples"), "sha256": hashlib.sha256(ident.encode()).hexdigest()[:16],
+            "sources": [f["source"] for f in files], "expected_counts": manifest.get("expected_counts")}
+
+
+def write_run_json(run_dir: Path, cfg: dict, status: str, **fields) -> dict:
+    """``run.json`` — the index entry the analysis app lists runs by. Rewritten as the run progresses
+    (``running`` -> ``completed`` | ``failed``); earlier fields are kept."""
+    path = run_dir / "run.json"
+    old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    meta = cfg.get("meta", {}) or {}
+    doc = {
+        "schema_version": RESULTS_SCHEMA_VERSION,
+        "run_id": run_dir.name,
+        "name": get_by_path(cfg, "run.name"),
+        "task": get_by_path(cfg, "task.type", "guardrail"),
+        "started_at": _now(),
+        "git_sha": (meta.get("git") or {}).get("commit"),
+        "config_hash": meta.get("config_hash"),
+        **old, **fields, "status": status,
+    }
+    if status != "running":
+        doc["finished_at"] = _now()
+    _write_json(path, doc)
+    return doc
+
+
 async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = False) -> None:
+    write_run_json(run_dir, cfg, "running")
+    try:
+        await _run_inner(cfg, run_dir, resume, force)
+    except BaseException as e:
+        write_run_json(run_dir, cfg, "failed", error=f"{type(e).__name__}: {e}"[:500])
+        raise
+
+
+async def _run_inner(cfg: dict, run_dir: Path, resume: bool, force: bool) -> None:
     samples, manifest = load_eval_set(cfg)
     task = build_task(cfg)
     n_before = len(samples)
@@ -198,6 +260,8 @@ async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = Fal
             _check_resume(run_dir, manifest, desc, force)
         _write_json(run_dir / "data_manifest.json", manifest)
         _write_json(run_dir / "task.json", desc)
+        write_run_json(run_dir, cfg, "running", subject=task.subject(), dataset=_dataset_summary(manifest),
+                       judge=desc.get("judge"), error=None)
         rows = await run_predictions(task, samples, cfg, run_dir / "predictions.jsonl")
     finally:
         await task.shutdown()
@@ -211,6 +275,8 @@ async def _run(cfg: dict, run_dir: Path, resume: bool = False, force: bool = Fal
         metrics.setdefault("warnings", []).append(msg)
     write_report(run_dir, metrics, cfg, manifest, desc, rows)
     o = metrics["overall"]
+    write_run_json(run_dir, cfg, "completed", n_scored=metrics.get("n_scored"), n_total=metrics.get("n_total"),
+                   has_scores=any(r.get("score") is not None for r in rows), warnings=metrics.get("warnings") or [])
     log.info("done [%s]: n=%s precision=%s recall=%s f1=%s fpr=%s -> %s", task.registry_name, o["n"], o["precision"],
              o["recall"], o["f1"], o["fpr"], run_dir)
 
@@ -221,7 +287,10 @@ def _list() -> None:
     from .targets import TARGETS
     from .tasks import TASKS
 
-    for title, reg in (("tasks", TASKS), ("targets (guardrail task)", TARGETS), ("generators (model_safety)", GENERATORS),
+    from .adapters import ADAPTERS
+
+    for title, reg in (("tasks", TASKS), ("targets (guardrail task)", TARGETS),
+                       ("adapters (http_guardrail target)", ADAPTERS), ("generators (model_safety)", GENERATORS),
                        ("refusal judges", REFUSAL_JUDGES)):
         print(f"{title}:")
         for d in reg.describe():

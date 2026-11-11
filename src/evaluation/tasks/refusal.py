@@ -120,6 +120,11 @@ class ModelSafetyTask(_JudgeTask):
                 "blocked_counts_as_refusal": self.blocked_is_refusal,
                 "reuse_generations_from": self.section.get("reuse_generations_from")}
 
+    def subject(self) -> dict[str, Any]:
+        g = self.generator.describe()
+        return {"kind": "model", "name": g.get("model") or g.get("type"), "generator": g.get("type"),
+                "gen_fingerprint": g.get("fingerprint")}
+
     def _load_cache(self, run_dir: Path) -> dict[str, dict]:
         path = run_dir / "predictions.jsonl" if run_dir.is_dir() else run_dir
         cache, mismatched = {}, 0

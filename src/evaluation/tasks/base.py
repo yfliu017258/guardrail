@@ -46,6 +46,10 @@ class EvalTask(abc.ABC):
     def describe(self) -> dict[str, Any]:
         return {"task": self.registry_name, "positive": self.POSITIVE}
 
+    def subject(self) -> dict[str, Any]:
+        """What was evaluated, for ``run.json`` (the analysis app's index): ``{kind, name, ...}``."""
+        return {"kind": self.registry_name, "name": get_by_path(self.cfg, "run.name", self.registry_name)}
+
     # -- per sample ------------------------------------------------------- #
     def gold(self, sample: EvalSample) -> bool:
         """Ground-truth positive for a sample (default: the server should block it)."""
