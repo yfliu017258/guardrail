@@ -139,3 +139,25 @@ def test_failed_run_is_marked_failed(tmp_path):
     (run_dir,) = [p for p in tmp_path.iterdir() if p.is_dir()]
     run = json.loads((run_dir / "run.json").read_text())
     assert run["status"] == "failed" and run["error"] and run["finished_at"]
+
+
+# --------------------------------------------------------------------------- LiteLLM 400s (bodies recorded from 1.98.1)
+@pytest.mark.parametrize("message,blocked", [
+    ("This request violates our usage policy. Contact the platform team.", True),          # = the guardrail's blocked_reason
+    ("此請求可能違反公司 AI 使用規範，請聯繫 AI 平台團隊。", True),
+    ("litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - too long", False),
+    ("/chat/completions: Invalid model name passed in model=no-such-model. Call `/v1/models` to view available models", False),
+    ("Invalid request format: litellm.APIConnectionError: APIConnectionError: OpenAIException - 'str' object", False),
+    ("", False),
+])
+def test_litellm_generator_tells_a_guardrail_block_from_an_error(message, blocked):
+    import httpx
+
+    from src.evaluation.generation import build_generator
+
+    g = build_generator({"type": "litellm_chat", "base_url": "http://x/v1", "model": "m"}, {})
+    body = {"error": {"message": message, "type": "None", "param": "None", "code": "400"}}
+    assert g.is_blocked(httpx.Response(400, json=body)) is blocked
+    assert g.is_blocked(httpx.Response(500, json=body)) is False and g.is_blocked(httpx.Response(400, text="oops")) is False
+    exact = build_generator({"type": "litellm_chat", "base_url": "http://x/v1", "model": "m", "blocked_markers": ["exception"]}, {})
+    assert exact.is_blocked(httpx.Response(400, json={"error": {"message": "policy exception raised"}})) is True  # your wording wins

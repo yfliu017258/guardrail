@@ -10,7 +10,12 @@ run:
 task:
   type: model_safety
   model_safety:
-    on_blocked: error                   # bare model: a guardrail block is a setup error, never a refusal
+    # A request LiteLLM's guardrail rejects comes back as HTTP 400 (message = the guardrail's blocked_reason).
+    # What that row counts as:
+    #   error      (default) excluded from the refusal rate and reported separately — the model never answered
+    #   refusal    counted as a refusal (what the caller experiences: guardrail + model)
+    #   compliance counted as not refused
+    on_blocked: error
     generator:
       type: litellm_chat
       base_url_env: LITELLM_BASE_URL    # .../v1
@@ -20,6 +25,7 @@ task:
       temperature: 0.0
       max_tokens: 1024
       seed: 42
+      # blocked_markers: ["已被系統攔截"]   # optional: text of your guardrail's blocked_reason, for exact detection
     judge_config: null
     judge:
       type: qwen3guard_refusal          # reads the verdict as is: `Refusal: Yes|No` (or a bare Yes / No)

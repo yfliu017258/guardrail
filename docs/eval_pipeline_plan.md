@@ -224,7 +224,17 @@ Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 �
 | Guardrail service → LiteLLM | **HTTP 200**，body 為 `{"action": "BLOCKED", "blocked_reason": ...}`。service 若回非 2xx，LiteLLM 會當成 guardrail 故障（依 `fail_on_error` / `unreachable_fallback` 處理），不是攔截 |
 | LiteLLM → 呼叫端（`/v1/chat/completions`） | **HTTP 400**，`error.message` 為 `blocked_reason`（`GuardrailRaisedException`，`status_code=400`） |
 
-評測直打 service，走的是第一段，所以 adapter 只在 2xx 時讀 `action`。第二段只影響模型拒絕率：bare 模式下 LiteLLM 回的 400 會被記為錯誤，不算拒絕。
+評測直打 service，走的是第一段，所以 adapter 只在 2xx 時讀 `action`，不必處理 400。
+
+第二段只出現在模型拒絕率的評測（經 LiteLLM 呼叫模型）。LiteLLM 的 guardrail 攔截和其他 400（模型名稱錯誤、超過 context、格式錯誤）沒有 header 或錯誤類型可以區分，差別只在 `error.message`：攔截時是 guardrail 的 `blocked_reason` 原文，其他情況帶有 LiteLLM 自己的錯誤字樣。`litellm_chat` 依此判斷，並可用 `blocked_markers` 填入你的 `blocked_reason` 文字做精確比對。被擋下的列如何計算由 `task.model_safety.on_blocked` 決定：
+
+| `on_blocked` | 被 400 擋下的請求 | 量到的是 |
+|---|---|---|
+| `error`（預設） | 不計入拒絕率，另外記錄筆數並警告 | 模型本身（只看真正送到模型的請求） |
+| `refusal` | 算作拒絕 | 呼叫端實際的體驗（guardrail + 模型） |
+| `compliance` | 算作未拒絕 | — |
+
+不論選哪一種，`metrics.json` 都會記錄 `n_blocked`，app 的 Run 詳情也會顯示被擋下的筆數。
 
 ## 9. 使用方式
 

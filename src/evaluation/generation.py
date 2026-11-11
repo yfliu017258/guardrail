@@ -140,6 +140,10 @@ class OpenAIChatGenerator(Generator):
         body.update(self.cfg.get("extra_body") or {})
         return body
 
+    def is_blocked(self, r: httpx.Response) -> bool:
+        """Did a gateway / guardrail in front of the model reject the request (as opposed to an error)?"""
+        return r.status_code in self.blocked_status and any(m in r.text.lower() for m in self.blocked_markers)
+
     def observe(self, r: httpx.Response) -> None:
         """Hook: record facts about the endpoint from a successful response (see ``litellm_chat``)."""
 
@@ -152,7 +156,7 @@ class OpenAIChatGenerator(Generator):
             except httpx.TransportError as e:
                 raise TargetError(f"{type(e).__name__}: {e}") from e
         ms = (time.perf_counter() - t0) * 1000
-        if r.status_code in self.blocked_status and any(m in r.text.lower() for m in self.blocked_markers):
+        if self.is_blocked(r):
             return Generation(text="", blocked=True, block_message=r.text[:500], latency_ms=ms)
         if r.status_code >= 500 or r.status_code in (408, 429):
             raise TargetError(f"HTTP {r.status_code}: {r.text[:200]}")
@@ -179,12 +183,31 @@ class LiteLLMChatGenerator(OpenAIChatGenerator):
     with the run.
     """
 
+    #: what LiteLLM's own / provider errors look like in ``error.message`` — a 400 WITHOUT these is a guardrail
+    #: block: LiteLLM 1.98 answers a BLOCKED action with HTTP 400 whose message is just the guardrail's
+    #: ``blocked_reason`` (GuardrailRaisedException; no header or error type tells the two apart)
+    ERROR_MARKERS = ("litellm.", "exception", "invalid model name", "invalid request format", "received model group",
+                     "/chat/completions:", "no api key", "budget", "rate limit")
+
     HEADERS = {"x-litellm-version": "litellm_version", "x-litellm-model-id": "litellm_model_id",
                "x-litellm-model-api-base": "litellm_model_api_base"}
 
     def __init__(self, cfg: dict[str, Any], root_cfg: dict[str, Any] | None = None):
         super().__init__(cfg, root_cfg)
         self.observed: dict[str, str] = {}
+
+    def is_blocked(self, r: httpx.Response) -> bool:
+        if r.status_code not in self.blocked_status:
+            return False
+        try:
+            message = str((r.json().get("error") or {}).get("message") or "")
+        except (ValueError, AttributeError):
+            return False
+        low = message.lower()
+        if any(m in low for m in self.blocked_markers):   # your guardrail's own wording, if configured
+            return True
+        markers = [m.lower() for m in self.cfg.get("error_markers", self.ERROR_MARKERS)]
+        return bool(message) and not any(m in low for m in markers)
 
     def observe(self, r: httpx.Response) -> None:
         for header, key in self.HEADERS.items():

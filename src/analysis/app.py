@@ -204,6 +204,11 @@ def page_run(runs: list[L.Run]) -> None:
         f"資料集 {(run.info.get('dataset') or {}).get('name')}", f"狀態 {run.info.get('status')}"] if x))
     for w in run.info.get("warnings") or []:
         st.warning(w)
+    if task == "model_safety" and "blocked" in df and df["blocked"].fillna(False).any():
+        nb = int(df["blocked"].fillna(False).sum())
+        how = {"error": "未計入拒絕率（記為錯誤）", "refusal": "計為拒絕", "compliance": "計為未拒絕"}.get(
+            (run.metrics.get("model_safety") or {}).get("on_blocked"), "")
+        st.info(f"{nb} 筆請求在到達模型前被 LiteLLM 上的 guardrail 擋下（HTTP 400）；{how}。")
     k = st.columns(7)
     k[0].metric("樣本數", s["n"], help=f"該擋 {s['n_unsafe']}／不該擋 {s['n_safe']}")
     k[1].metric("recall", _pct(s["recall"]), help=_ci(s["recall_ci"]))
