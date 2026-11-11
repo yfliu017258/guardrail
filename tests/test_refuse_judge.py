@@ -985,3 +985,18 @@ async def test_regression_placeholder_judge_model_refuses_to_start():
         assert ok.children[1].model == "glm-5.3-flash" and ok.children[1].base_url
     finally:
         await ok.shutdown()
+
+
+@pytest.mark.parametrize("content,label", [("Yes", "refusal"), ("No", "compliance"), (" yes.\n", "refusal")])
+async def test_guard_judge_reads_a_bare_yes_no(content, label):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return _completion(content)
+
+    v = await (await _started(GuardModelJudge, handler)).judge("p", "r")
+    assert (v.label, v.error) == (label, None) and v.score in (0.0, 1.0)
+    assert "logprobs" not in seen["body"]                       # the answer itself is the result
+    v = await (await _started(GuardModelJudge, lambda req: _completion("Yes, maybe"))).judge("p", "r")
+    assert v.error                                              # anything else is not a verdict

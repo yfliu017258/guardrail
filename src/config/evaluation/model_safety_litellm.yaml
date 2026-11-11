@@ -22,13 +22,12 @@ task:
       seed: 42
     judge_config: null
     judge:
-      type: qwen3guard_refusal          # reads `Refusal: Yes|No` (no partial class)
+      type: qwen3guard_refusal          # reads the verdict as is: `Refusal: Yes|No` (or a bare Yes / No)
       base_url_env: LITELLM_BASE_URL
       api_key_env: LITELLM_API_KEY
       model: REPLACE-WITH-QWEN3GUARD-ALIAS   # the LiteLLM alias of Qwen3Guard-Gen
       max_tokens: 64
       temperature: 0.0
-      logprobs: true                    # best effort: switched off automatically if the proxy rejects it
-      top_logprobs: 5
+      logprobs: false                   # the Yes / No answer is the result; no probability is requested
       timeout: 60
       retries: 2

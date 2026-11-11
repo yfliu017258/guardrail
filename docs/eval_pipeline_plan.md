@@ -199,7 +199,7 @@ Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 �
 |---|---|---|
 | Service 的格式 | 直接回 LiteLLM generic guardrail API 格式 | 用內建的 `generic_guardrail_api` adapter，不必寫程式 |
 | 是否有分數 | 只回 `action` | 沒有 ROC、recall@FPR、threshold 分析；app 只顯示點估計（recall / FPR / F1 與 CI）。要比較不同嚴格度，只能請 service 換設定後各跑一次 |
-| 判斷模型 | `qwen3guard_refusal`（讀 Qwen3Guard-Gen 的 `Refusal: Yes/No`） | 沒有 partial 類別，部分配合的回覆會被歸到其中一邊；仍建議抽 100–200 筆人工核對 |
+| 判斷模型 | `qwen3guard_refusal`：直接讀 Qwen3Guard-Gen 的 Yes / No（`Refusal: Yes/No` 或只回 `Yes` / `No` 都接受），不要求 logprobs | 沒有 partial 類別，部分配合的回覆會被歸到其中一邊；仍建議抽 100–200 筆人工核對 |
 | App | Streamlit 可用 | 照 §6 |
 | 評測方向 | 以 request 為主，response 也要支援 | 已實作：資料多一個可選欄位 `response`，`--input-type response` 時送 `texts=[response]` |
 | `bare` 與 `end_to_end` | 只量 `bare`（模型本身，不經過 guardrail） | `model_safety_litellm.yaml` 設 `on_blocked: error`：請求若被 LiteLLM 上的 guardrail 擋下，該筆記為錯誤並在結果中警告，不會算成拒絕 |
@@ -216,6 +216,15 @@ Phase 1 先做，是因為 app 與兩種評測都依賴這份契約；Phase 2 �
 | 能回答的問題 | 「這個模型安全嗎？要不要換模型？」 | 「整個系統上線後的殘餘風險是多少？LiteLLM 的整合有沒有設對？」 |
 
 兩者不是二選一。**建議以 `bare` 為主**：它加上 guardrail 的直打評測，就能在 app 的「Guardrail × 模型」頁以 `sample_id` 合併，離線算出 end-to-end 的結果，而且能分辨每一筆是誰擋的。`end_to_end` 則用小樣本（幾百筆）跑一次做驗證：若實測與離線合併的結果不一致，代表 LiteLLM 上的設定（mode、`default_on`、fail-open）有問題。
+
+### Guardrail 擋下時的 HTTP 狀態（LiteLLM 1.98.1，已對照原始碼並實測）
+
+| 哪一段 | 擋下時的回覆 |
+|---|---|
+| Guardrail service → LiteLLM | **HTTP 200**，body 為 `{"action": "BLOCKED", "blocked_reason": ...}`。service 若回非 2xx，LiteLLM 會當成 guardrail 故障（依 `fail_on_error` / `unreachable_fallback` 處理），不是攔截 |
+| LiteLLM → 呼叫端（`/v1/chat/completions`） | **HTTP 400**，`error.message` 為 `blocked_reason`（`GuardrailRaisedException`，`status_code=400`） |
+
+評測直打 service，走的是第一段，所以 adapter 只在 2xx 時讀 `action`。第二段只影響模型拒絕率：bare 模式下 LiteLLM 回的 400 會被記為錯誤，不算拒絕。
 
 ## 9. 使用方式
 
