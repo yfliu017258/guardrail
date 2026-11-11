@@ -292,3 +292,69 @@ streamlit run src/analysis/app.py -- --results results/
 | App 五個頁面 | 以瀏覽器實際開啟並截圖檢查，無例外 |
 
 沒有驗證到的部分：真實的 guardrail service、真實的 Qwen3Guard（判斷品質與 logprobs 經 LiteLLM 是否可用）、大量資料下 app 的速度。
+
+## 11. 批次執行：新增 guardrail／模型／資料集
+
+一份清單檔列出所有評測對象，一個指令補齊還沒有結果的 run。
+
+```bash
+cp src/config/evaluation/suite.example.yaml suite.yaml   # 填入你的 service、模型 alias、資料集
+scripts/run_suite.sh                                     # 只跑還沒有完成結果的組合
+scripts/run_suite.sh suite.yaml --limit 50               # 每個資料集只取 50 筆，快速確認功能
+scripts/run_suite.sh suite.yaml --only my-new-guardrail  # 只跑指定的 guardrail／模型／資料集
+scripts/run_suite.sh suite.yaml --dry-run                # 只列出會跑哪些
+scripts/app.sh                                           # 開啟分析 app
+```
+
+```yaml
+# suite.yaml
+results: results
+datasets:
+  core_v1: processed_data/mixes/core_v1/
+  answers_qwen: {path: processed_data/responses/qwen.csv, input_type: response}   # response 方向
+guardrails:
+  my-guardrail: {url: "http://my-guardrail:8080", api_key_env: GUARDRAIL_SERVICE_API_KEY}
+models:
+  qwen3.6-27b: {}                  # 名稱即 LiteLLM 的 model alias
+judge: {model: qwen3guard}
+```
+
+- **新增 guardrail**：在 `guardrails` 加一行，重跑同一個指令。它會對每個資料集各跑一次。
+- **新增資料集**：在 `datasets` 加一行，重跑。每個 guardrail 和模型都會補跑這個資料集。
+- **新增模型**：在 `models` 加一行，重跑。模型只跑 request 方向的資料集。
+- 每個 run 命名為 `<對象>@<資料集>`。同名、資料相同（檔案內容與筆數上限都相同）且狀態為 completed 的 run 會跳過；資料改了或加 `--force` 才會重跑。
+- 某個 service 連不上時，該 run 記為 failed，其他組合照常執行；指令最後列出每個組合的狀態，有失敗時結束碼為 1。
+- `suite.yaml` 已列入 `.gitignore`（內含內部網址與模型名稱）。
+
+## 12. Result 的儲存方式
+
+所有結果放在一個目錄（預設 `results/`，不進 git），每次評測一個子目錄，彼此獨立。App 只讀這個目錄。
+
+```
+results/
+  20261111-164010_my-guardrail-core_v1_53e2aebe75a4/     # <UTC 時間>_<run 名稱>_<設定 hash>
+    run.json             # 索引：schema_version、狀態、評測對象、資料集識別碼、LiteLLM 版本、判斷模型、起訖時間
+    predictions.jsonl    # 逐筆結果，一列一筆樣本（評測中持續寫入，可 --resume）
+    metrics.json         # 整體與切片指標、信賴區間、latency
+    config.yaml          # 完整設定快照（secrets 已遮蔽）
+    data_manifest.json   # 每個資料檔的 sha256、使用筆數、抽樣 seed
+    task.json            # 評測對象的細節（adapter、網址、generator、judge）
+    environment.json     # Python 與套件版本
+    report.md  slices.csv  errors.csv      # 給人看的報表、切片、誤判樣本
+```
+
+| 檔案 | 誰會讀 | 內容重點 |
+|---|---|---|
+| `run.json` | app（列出與篩選 run） | `status`：running / completed / failed；`subject`：guardrail 或模型的名稱、方向、adapter；`dataset.sha256`：兩個 run 是否用同一份資料 |
+| `predictions.jsonl` | app（所有圖表與樣本表都由它算出） | 共用欄位：`sample_id`、`prompt`、`expected`、`source`、`language`、`gold_positive`、`pred_positive`、`latency_ms`、`error` |
+| | | Guardrail 專屬：`action`、`texts`、`texts_changed`、`blocked_reason`、`input_type`、`raw` |
+| | | 模型專屬：`response`、`refusal_label`、`judge`、`judge_reason`、`blocked`、`gen_latency_ms`、`judge_latency_ms` |
+| `metrics.json` | 人、其他工具 | 評測結束時算好的數字；app 不依賴它，會從 `predictions.jsonl` 重算 |
+
+設計上的幾個決定：
+
+- **一個 run 一個目錄、不覆寫**：重跑會產生新目錄，舊結果保留；app 以開始時間排序。
+- **`sample_id` = `<資料集檔名>:<prompt 的 hash>`**：同一筆樣本在每個 run 的 id 相同，所以不同 guardrail、guardrail 與模型之間可以逐筆對齊。
+- **結果自足**：`predictions.jsonl` 存完整 prompt 與回覆，分析時不需要原始資料集。也因此目錄可能含敏感內容，不進 git，搬移時整個目錄一起搬即可。
+- **`schema_version`**：格式改版時遞增；app 遇到不認得的版本會略過並提示，不會壞掉。
+- **JSONL 逐筆追加**：評測中斷後可續跑，進行中的 run 也能在 app 裡看到目前為止的結果。
