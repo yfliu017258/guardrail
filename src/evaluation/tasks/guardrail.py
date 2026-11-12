@@ -44,7 +44,11 @@ class GuardrailTask(EvalTask):
         adapter = (d.get("adapter") or {}).get("type")
         return {"kind": "guardrail_service", "name": get_by_path(self.cfg, "run.name", "guardrail"),
                 "target": d.get("type"), "adapter": adapter, "input_type": d.get("input_type", "request"),
-                "base_url": d.get("base_url")}
+                "base_url": d.get("base_url"),
+                # what the service said about itself (its info endpoint), for the analysis app
+                **({"service_info": d["server_info"]} if d.get("server_info") else {}),
+                **({"service_changed_during_run": d["server_changed_during_run"]}
+                   if "server_changed_during_run" in d else {})}
 
     async def predict(self, sample: EvalSample) -> dict[str, Any]:
         pred = await self.target.predict(sample)  # TargetError propagates -> runner retries

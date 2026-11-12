@@ -204,6 +204,11 @@ def page_run(runs: list[L.Run]) -> None:
         f"資料集 {(run.info.get('dataset') or {}).get('name')}", f"狀態 {run.info.get('status')}"] if x))
     for w in run.info.get("warnings") or []:
         st.warning(w)
+    if sub.get("service_changed_during_run"):
+        st.warning("Guardrail service 的資訊在評測前後不一致：這個 run 可能混了兩種設定。")
+    if run.service_info:
+        with st.expander("Guardrail service 資訊（評測開始時由 service 回報）"):
+            st.json(run.service_info, expanded=2)
     if task == "model_safety" and "blocked" in df and df["blocked"].fillna(False).any():
         nb = int(df["blocked"].fillna(False).sum())
         how = {"error": "未計入拒絕率（記為錯誤）", "refusal": "計為拒絕", "compliance": "計為未拒絕"}.get(
@@ -305,6 +310,15 @@ def page_compare(runs: list[L.Run]) -> None:
                     width="stretch", config=PLOT_CFG)
     st.plotly_chart(_ecdf({r.label: aligned[f"{r.label}__ms"] for r in chosen}, "Latency 累積分佈"),
                     width="stretch", config=PLOT_CFG)
+
+    if any(r.service_info for r in chosen):
+        st.subheader("Guardrail service 資訊")
+        diff_only = st.toggle("只顯示不同的設定", value=True, key="cmp_info_diff")
+        info = L.info_table(chosen, diff_only)
+        if info.empty:
+            st.caption("這些 run 回報的 service 資訊完全相同。" if diff_only else "沒有 service 資訊。")
+        else:
+            st.dataframe(info, hide_index=True, width="stretch")
 
     st.subheader("兩個 run 的差異樣本")
     a_col, b_col = st.columns(2)

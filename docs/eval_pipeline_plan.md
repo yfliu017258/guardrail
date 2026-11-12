@@ -372,6 +372,28 @@ results/
 | | | 模型專屬：`response`（模型回覆全文）、`reasoning`（thinking 內容）、`finish_reason`、`usage`、`refusal_label`、`judge`、`judge_reason`、`raw`（判斷模型的原始輸出）、`judge_extra`、`blocked`、`block_message`、`gen_latency_ms`、`judge_latency_ms`、`gen_fingerprint`、`response_truncated` |
 | `metrics.json` | 人、其他工具 | 評測結束時算好的數字；app 不依賴它，會從 `predictions.jsonl` 重算 |
 
+### Guardrail service 的資訊
+
+設定 `info_path`（例如 `/v1/info`）後，每個 guardrail run 會向 service 的資訊端點取一次 JSON，原樣存進結果：
+
+```yaml
+guardrails:
+  my-guardrail: {url: "http://my-guardrail:8080", info_path: /v1/info}
+```
+
+| 存在哪裡 | 內容 |
+|---|---|
+| `run.json` → `subject.service_info` | 評測開始時 service 回報的資訊（app 讀這份） |
+| `run.json` → `subject.service_changed_during_run` | 評測前後的資訊是否不同 |
+| `task.json` → `server_info`、`server_info_end`、`server_identity` | 開始與結束時各一份；`server_identity` 是去掉啟動時間、計數器等會自然變動的欄位後的內容 |
+
+- **格式不限**：service 回什麼 JSON 就存什麼，不需要固定欄位。名稱像 key、token、secret 的欄位在寫檔時會被遮蔽。
+- **評測中途換版**：開始和結束的資訊不同時，結果會帶警告，app 的 Run 詳情也會顯示。
+- **續跑時的保護**：中斷的 run 要接續時，若 service 的資訊已經和當初不同，就不會接續，而是開新的 run，避免一個 run 混到兩個版本。
+- **端點讀不到**：預設只記錄錯誤並警告，評測照跑；設 `info_required: true` 則直接中止。
+- **哪些欄位算「會自然變動」**：預設忽略 `started_at`、`uptime`、`stats` 等，可用 `info_ignore_keys` 調整。
+- App：Run 詳情可展開完整資訊；Run 比較列出各 run 之間不同的設定（例如模型、門檻、版本）。
+
 設計上的幾個決定：
 
 - **一個 run 一個目錄、不覆寫**：重跑會產生新目錄，舊結果保留；app 以開始時間排序。

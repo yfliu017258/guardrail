@@ -109,3 +109,16 @@ def test_every_app_page_renders(results, monkeypatch):
         at.sidebar.radio[0].set_value(page).run()
         assert not at.exception, f"{page}: {[e.value for e in at.exception]}"
         assert not at.error, f"{page}: {[e.value for e in at.error]}"
+
+
+def test_service_info_table():
+    class R:
+        def __init__(self, label, info):
+            self.label, self.service_info = label, info
+
+    a = R("a", {"version": "1.2", "model": "guard-4b", "stages": [{"name": "llm", "threshold": 0.5}]})
+    b = R("b", {"version": "1.2", "model": "guard-8b", "stages": [{"name": "llm", "threshold": 0.7}], "extra": True})
+    diff = L.info_table([a, b])
+    assert list(diff["設定"]) == ["extra", "model", "stages.0.threshold"] and list(diff.columns) == ["設定", "a", "b"]
+    assert len(L.info_table([a, b], only_differences=False)) == 5
+    assert L.flatten({"x": {"y": [1, 2]}}) == {"x.y": [1, 2]}

@@ -161,3 +161,40 @@ def test_litellm_generator_tells_a_guardrail_block_from_an_error(message, blocke
     assert g.is_blocked(httpx.Response(500, json=body)) is False and g.is_blocked(httpx.Response(400, text="oops")) is False
     exact = build_generator({"type": "litellm_chat", "base_url": "http://x/v1", "model": "m", "blocked_markers": ["exception"]}, {})
     assert exact.is_blocked(httpx.Response(400, json={"error": {"message": "policy exception raised"}})) is True  # your wording wins
+
+
+# --------------------------------------------------------------------------- the service's info endpoint
+def test_service_info_is_stored_with_the_run(mock_server, tmp_path):
+    run_dir = _eval(mock_server, tmp_path / "info", "--set", "target.http_guardrail.info_path=/v1/info")
+    run = json.loads((run_dir / "run.json").read_text())
+    info = run["subject"]["service_info"]
+    assert info["pipeline_hash"] and {s["name"] for s in info["stages"]} == {"rules", "mock_guard"}
+    assert run["subject"]["service_changed_during_run"] is False and run["warnings"] == []
+    task = json.loads((run_dir / "task.json").read_text())
+    assert task["server_info"] == info and task["server_info_end"]["pipeline_hash"] == info["pipeline_hash"]
+    assert "started_at" not in task["server_identity"]                     # volatile keys are not identity
+
+    # no such endpoint: recorded and warned about, the evaluation itself still runs ...
+    run_dir = _eval(mock_server, tmp_path / "missing", "--set", "target.http_guardrail.info_path=/nope")
+    run = json.loads((run_dir / "run.json").read_text())
+    assert "error" in run["subject"]["service_info"] and run["status"] == "completed" and len(_rows(run_dir)) == 27
+    assert any("could not verify" in w for w in run["warnings"])
+    # ... unless the info is required
+    with pytest.raises(RuntimeError, match="guardrail info"):
+        _eval(mock_server, tmp_path / "required", "--set", "target.http_guardrail.info_path=/nope",
+              "--set", "target.http_guardrail.info_required=true")
+
+
+def test_a_changed_service_is_flagged_and_not_resumed(tmp_path):
+    from src.server.testing import BackgroundServer
+
+    out = tmp_path / "out"
+    with BackgroundServer(["src/config/server/mock.yaml"]) as a:
+        url, port = a.url, a.port
+        run_dir = _eval(a, out, "--set", "target.http_guardrail.info_path=/v1/info", "--limit", "8")
+    lines = (run_dir / "predictions.jsonl").read_text().splitlines()
+    (run_dir / "predictions.jsonl").write_text("\n".join(lines[:3]) + "\n")   # interrupted after 3 rows
+    with BackgroundServer(["src/config/server/mock.yaml"], overrides=["pipeline.stages.1.threshold=0.41"], port=port) as b:
+        assert b.url == url
+        with pytest.raises(SystemExit, match="refusing to --resume"):         # another guardrail now answers there
+            main(["--resume", str(run_dir), *NOENV])

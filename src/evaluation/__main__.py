@@ -158,8 +158,8 @@ def _target_warnings(desc: dict) -> list[str]:
         out.append("the guardrail server changed during the run (pipeline_hash / code differ between start and end, "
                    "or between resumed segments): predictions mix two configurations")
     elif desc.get("server_changed_during_run") is None and "server_info_end" in desc:
-        out.append("could not verify the guardrail server at the end of the run "
-                   f"({(desc.get('server_info_end') or {}).get('error', 'no /v1/info')})")
+        err = (desc.get("server_info_end") or {}).get("error") or (desc.get("server_info") or {}).get("error")
+        out.append(f"could not verify the guardrail server at the end of the run ({err or 'no info'})")
     return out
 
 

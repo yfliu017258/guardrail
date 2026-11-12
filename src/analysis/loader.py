@@ -152,6 +152,12 @@ class Run:
         return self.subject.get("input_type") or "request"
 
     @property
+    def service_info(self) -> dict[str, Any]:
+        """What the guardrail service reported about itself (its info endpoint) when the run started."""
+        info = self.subject.get("service_info")
+        return info if isinstance(info, dict) else {}
+
+    @property
     def dataset_id(self) -> str | None:
         return (self.info.get("dataset") or {}).get("sha256")
 
@@ -233,6 +239,38 @@ def disagreements(aligned: pd.DataFrame, a: str, b: str) -> dict[str, pd.DataFra
         f"只有「{b}」誤擋（不該擋）": aligned[~gold & ~aligned[a] & aligned[b]],
         "兩者都漏擋": aligned[gold & ~aligned[a] & ~aligned[b]],
     }
+
+
+VOLATILE_INFO_KEYS = frozenset({"started_at", "start_time", "uptime", "uptime_s", "uptime_seconds", "timestamp", "time",
+                                "now", "stats", "request_count", "requests", "hostname", "pid"})
+
+
+def flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
+    """Nested info -> ``{"pipeline.stages.0.threshold": 0.5, ...}`` so two services compare key by key."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+        return out
+    if isinstance(obj, list) and any(isinstance(v, (dict, list)) for v in obj):
+        out = {}
+        for i, v in enumerate(obj):
+            out.update(flatten(v, f"{prefix}.{i}"))
+        return out
+    return {prefix: obj}
+
+
+def info_table(runs: list[Run], only_differences: bool = True) -> pd.DataFrame:
+    """Service info of several runs side by side (rows = settings, columns = runs)."""
+    flat = {r.label: flatten(r.service_info) for r in runs}
+    keys = sorted({k for f in flat.values() for k in f})
+    rows = []
+    for k in keys:
+        values = [json.dumps(f[k], ensure_ascii=False) if k in f and not isinstance(f[k], str) else f.get(k) for f in flat.values()]
+        if only_differences and (len(set(map(str, values))) == 1 or k.rsplit(".", 1)[-1] in VOLATILE_INFO_KEYS):
+            continue  # identical, or a value that differs between any two processes (start time, counters)
+        rows.append({"設定": k, **dict(zip(flat, values))})
+    return pd.DataFrame(rows, columns=["設定", *flat])
 
 
 def combine(model: Run, guard: Run | None) -> pd.DataFrame:

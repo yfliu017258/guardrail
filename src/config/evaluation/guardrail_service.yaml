@@ -22,5 +22,11 @@ target:
     canary: true                      # one text that must be BLOCKED before any number is reported
     # canary_text: "..."              # set it when the default injection canary is outside this service's policy
     # headers: {}                     # extra static headers
+    # The service's info endpoint (GET, JSON): read before and after the run and stored in run.json / task.json,
+    # so every result says which version / model / thresholds produced it. A change during the run is a warning,
+    # and an interrupted run is not resumed against a service whose info changed.
+    info_path: null                   # e.g. /v1/info
+    info_required: false              # true: no info, no run
+    # info_ignore_keys: [started_at, uptime, stats]   # keys that change without the guardrail changing
 metrics:
   slice_by: [source, language]

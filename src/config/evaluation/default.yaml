@@ -41,6 +41,8 @@ target:
     api_key_env: GUARDRAIL_SERVICE_API_KEY
     input_type: request       # request: judge the prompt | response: judge the `response` column
     canary: true
+    info_path: null           # e.g. /v1/info: the service's self-description, stored with the run (start + end)
+    info_required: false      # true: abort when the info cannot be read
   inprocess:
     server_config: [src/config/server/default.yaml]
     overrides: []             # dotted overrides applied to the server config

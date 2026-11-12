@@ -20,6 +20,7 @@ guardrails:               # services that speak the LiteLLM generic guardrail AP
     url: http://my-guardrail:8080
     api_key_env: GUARDRAIL_SERVICE_API_KEY      # name of the variable in .env (sent as x-api-key); omit for no auth
     # canary_text: "..."                        # a text this service must block, if not prompt injection
+    # info_path: /v1/info                       # the service's info endpoint: stored with every run
     # datasets: [core_v1]                       # default: every dataset
   # my-guardrail-strict:
   #   url: http://my-guardrail-strict:8080
