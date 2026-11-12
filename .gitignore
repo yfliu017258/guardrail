@@ -15,3 +15,4 @@ src/config/server/policies/internal_rules.yaml
 
 # your own suite (internal URLs / model aliases)
 /suite.yaml
+/logs/

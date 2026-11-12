@@ -326,6 +326,27 @@ judge: {model: qwen3guard}
 - 某個 service 連不上時，該 run 記為 failed，其他組合照常執行；指令最後列出每個組合的狀態，有失敗時結束碼為 1。
 - `suite.yaml` 已列入 `.gitignore`（內含內部網址與模型名稱）。
 
+### 放著跑、中斷後續跑、筆數上限
+
+```bash
+scripts/run_experiments.sh start                                   # suite.yaml 裡還沒完成的全部實驗，背景執行
+scripts/run_experiments.sh start my-guardrail qwen3.6-27b@core_v1   # 只跑指定的實驗
+scripts/run_experiments.sh status                                  # 是否還在跑、目前進度、最後的總表
+scripts/run_experiments.sh logs                                    # 跟著看 log
+scripts/run_experiments.sh stop                                    # 停止；之後 start 會從停下的地方接續
+MAX_SAMPLES=200 RETRIES=5 RETRY_WAIT=300 scripts/run_experiments.sh start
+```
+
+- **實驗的指定方式**：guardrail／模型名稱、資料集名稱，或 `<對象>@<資料集>`，名稱取自 `suite.yaml`。
+- **背景執行**：用 `nohup` 啟動，關掉終端機不會中斷；log 在 `logs/experiments_<時間>.log`，同時間只允許一個在跑。
+- **Resume**：每筆結果寫完就落檔。行程被中斷、機器重開或 service 中途掛掉後，再次 `start`（或直接跑 `python -m src.evaluation.suite`）會在原本的 run 目錄接續：已完成的列保留，只送還沒做的列，最後一列若寫到一半會自動修掉。設定改過（例如換了網址）就無法接續，會開新的 run。
+- **自動重試**：某個實驗失敗時，其他實驗照跑；全部跑完一輪後等 `RETRY_WAIT` 秒，把失敗的再試一次（接續而非重來），最多 `RETRIES` 輪。
+- **單筆的連線失敗**：每筆請求先重試 3 次；仍失敗的列記為錯誤、不計入指標。對已完成的 run 加 `EXTRA="--retry-errors"` 可以只補送這些列。
+- **筆數上限（max data）**：`suite.yaml` 的 `max_samples`（全部資料集）、資料集自己的 `max_samples`，或 `MAX_SAMPLES=` / `--max-samples`（優先）。抽樣固定 seed 並依 `expected` 分層，所以每個 guardrail 和模型測到的是同一批樣本。上限不同就視為不同的資料，會產生新的 run。
+- 還沒送出任何請求就失敗的 run（service 連不上、key 錯）不會留下空目錄，錯誤訊息在 log 和總表裡。
+
+單獨一個 run 也能手動接續：`python -m src.evaluation --resume results/<run 目錄>`。
+
 ## 12. Result 的儲存方式
 
 所有結果放在一個目錄（預設 `results/`，不進 git），每次評測一個子目錄，彼此獨立。App 只讀這個目錄。
