@@ -25,6 +25,13 @@ datasets:
   # of our xstest / or_bench / notinject converters (same prompt pass here, block there -> a cross-source conflict).
   # Add them with `configs: [...]` only for an injection-only eval that does not also contain those converters.
   pi_eval_suite: {}                                          # direct + jailbreak + indirect (deepset/jackhhao/boundary/neuralchemy/bipia/piarena/llmail)
+  # The three sets in current use. deepset / neuralchemy are ALSO inside pi_eval_suite (deepset_test, neuralchemy_test):
+  # use either these entries or pi_eval_suite in one eval, not both (the same prompts would count twice).
+  # Quality notes and which rows to drop: docs/prompt_injection_data.md §1.
+  deepset_prompt_injections: {enabled: false}                # 116 test rows, en/de, noisy positives -> sanity check
+  neuralchemy_pi: {enabled: false}                           # `core` test, 942 rows, en
+  eric12132_pi_en: {enabled: false, converter: eric12132_pi, text_column: prompt}                 # 91 test rows; CC-BY-NC upstream
+  eric12132_pi_zhtw: {enabled: false, converter: eric12132_pi, text_column: taiwan_translation}   # machine zh-TW, ~29% broken positives
   boundary_pairs: {}                                         # benign/attack minimal pairs
   notinject: {}                                              # over-defense FPR (all pass)
   # `sample` = seeded, stratified by expected (keeps the ~9% jailbreak base rate). Not `limit`: it stops after N rows,

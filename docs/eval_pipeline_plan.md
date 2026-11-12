@@ -358,3 +358,19 @@ results/
 - **結果自足**：`predictions.jsonl` 存完整 prompt 與回覆，分析時不需要原始資料集。也因此目錄可能含敏感內容，不進 git，搬移時整個目錄一起搬即可。
 - **`schema_version`**：格式改版時遞增；app 遇到不認得的版本會略過並提示，不會壞掉。
 - **JSONL 逐筆追加**：評測中斷後可續跑，進行中的 run 也能在 app 裡看到目前為止的結果。
+
+## 13. 目前使用的三個 prompt injection 資料集
+
+```bash
+uv pip install -e ".[data]"
+python -m src.converters --config src/config/data_pi_three.yaml     # 下載並轉成 prompt,expected
+```
+
+| 輸出檔（= 評測時的 source） | 來源 | 取用的部分 | 標籤對應 |
+|---|---|---|---|
+| `deepset_prompt_injections.csv` | `deepset/prompt-injections` | test，116 列（en / de） | `label` 1 → block，0 → pass |
+| `neuralchemy_pi.csv` | `neuralchemy/Prompt-injection-dataset`，`core` config | test，942 列 | `label` 1 → block，0 → pass |
+| `eric12132_pi_en.csv` | `Eric12132/prompt-injections-benchmark-chinese` | test，91 列，`prompt` 欄（英文） | Yes → block，No → pass |
+| `eric12132_pi_zhtw.csv` | 同上 | test，91 列，`taiwan_translation` 欄 | 同上 |
+
+之後在 `suite.yaml` 的 `datasets` 各加一行即可。轉換時空白的文字、無法辨識的標籤會被丟棄並記在 `<name>.manifest.json`，同一檔內重複的 prompt 只留一筆。三個資料集的品質問題與建議的清理方式見 `docs/prompt_injection_data.md` §1。

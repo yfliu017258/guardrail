@@ -1,0 +1,16 @@
+# Only the three prompt-injection sets in current use:
+#   python -m src.converters --config src/config/data_pi_three.yaml
+# -> processed_data/{deepset_prompt_injections,neuralchemy_pi,eric12132_pi_en,eric12132_pi_zhtw}.csv (+ .manifest.json)
+# Each file is one source in the evaluation: the app slices and compares by it.
+raw_dir: data/raw
+processed_dir: processed_data
+
+datasets:
+  deepset_prompt_injections: {}        # deepset/prompt-injections, test split (116 rows, en/de): label 1 -> block, 0 -> pass
+  neuralchemy_pi: {}                   # neuralchemy/Prompt-injection-dataset, `core` config, test split (942 rows)
+  # Eric12132/prompt-injections-benchmark-chinese, test split (91 rows): Yes -> block, No -> pass.
+  # Upstream licence is CC-BY-NC-4.0. The two entries are the same rows in two languages.
+  eric12132_pi_en: {converter: eric12132_pi, text_column: prompt}
+  eric12132_pi_zhtw: {converter: eric12132_pi, text_column: taiwan_translation}   # unreviewed machine translation
+  # more rows (train splits) for a tighter confidence interval — only for guardrails NOT trained on them:
+  # eric12132_pi_en_train: {converter: eric12132_pi, text_column: prompt, splits: [train]}
