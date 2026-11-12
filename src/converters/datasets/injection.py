@@ -87,6 +87,37 @@ class DeepsetPI(HFDatasetSource, TextLabelConverter):
     default_splits = ("test",)
 
 
+@register("eric12132_pi")
+class Eric12132PI(HFDatasetSource, TextLabelConverter):
+    """Eric12132 jailbreak benchmark (Qualifire prompts + an LLM zh-TW translation): Yes -> block, No -> pass.
+
+    Option ``text_column``: ``prompt`` (default, the English original) or ``taiwan_translation``. The
+    translation is machine-made and unreviewed: in a 214-row audit about 29% of the translated attacks
+    no longer contain the attack (the translator answered or obeyed the prompt) yet keep the label Yes,
+    so recall measured on it is biased low (docs/prompt_injection_data.md §1). Option ``label_column``
+    (default ``label``). Upstream licence is CC-BY-NC-4.0."""
+
+    hf_id = "Eric12132/prompt-injections-benchmark-chinese"
+    license = "cc-by-nc-4.0 (upstream rogue-security/prompt-injections-benchmark; no card on this repo)"
+    default_splits = ("test",)
+    positive_values = frozenset({"yes", "1", "true", "jailbreak"})
+    negative_values = frozenset({"no", "0", "false", "benign"})
+    skip_blank_text = True   # a row the translator left empty is skipped, not an error
+    TEXT_COLUMNS = ("prompt", "taiwan_translation")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.text_column = self.options.get("text_column", "prompt")
+        if self.text_column not in self.TEXT_COLUMNS:  # a typo must not turn every row into a skipped one
+            raise ValueError(f"{self.name}: text_column must be one of {self.TEXT_COLUMNS}, got {self.text_column!r}")
+
+    def text(self, r: Record) -> str:
+        return str(r.get(self.text_column) or "").strip()
+
+    def is_positive(self, r: Record) -> bool:
+        return super().is_positive({"label": r.get(self.options.get("label_column", "label"))})
+
+
 @register("jackhhao_jailbreak")
 class JackhhaoJailbreak(HFDatasetSource, TextLabelConverter):
     """jackhhao/jailbreak-classification: ``type`` jailbreak -> block, benign -> pass."""

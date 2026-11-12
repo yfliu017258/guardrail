@@ -1,6 +1,6 @@
 """HTTP contracts.
 
-``LiteLLMGuardrailRequest/Response`` mirror LiteLLM 1.92.0
+``LiteLLMGuardrailRequest/Response`` mirror LiteLLM 1.98.1
 ``litellm/types/proxy/guardrails/guardrail_hooks/generic_guardrail_api.py`` (the generic guardrail
 API wire format) — the server does NOT depend on litellm. If callers move to a newer protocol version,
 diff that file and update these models; ``extra="allow"`` keeps us
@@ -39,6 +39,10 @@ class LiteLLMGuardrailResponse(BaseModel):
     action: Literal["NONE", "BLOCKED", "GUARDRAIL_INTERVENED"]
     blocked_reason: Optional[str] = None
     texts: Optional[list[str]] = None
+    # accepted by LiteLLM >= 1.98 (unused by this server; responses are serialized without nulls)
+    images: Optional[list[str]] = None
+    tools: Optional[list[dict[str, Any]]] = None
+    stream_holdback_chars: Optional[list[int]] = None
 
 
 class ClassifyRequest(BaseModel):

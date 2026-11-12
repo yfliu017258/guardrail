@@ -342,7 +342,8 @@ def redact(obj: Any, key: str = "", _inherited: bool = False) -> Any:
         return {k: redact(v, str(k), secret) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [redact(v, key, secret) for v in obj]
-    if secret and obj not in (None, "", "EMPTY"):
+    # numbers are counts / settings, never credentials (`expected_counts: {pass: 15}` must stay readable)
+    if secret and obj not in (None, "", "EMPTY") and not isinstance(obj, (bool, int, float)):
         return REDACTED
     if isinstance(obj, str):
         return scrub_url(obj)

@@ -2,7 +2,7 @@
 
 ## 1. Server API 契約
 
-server 採 generic guardrail API 協定。呼叫端（gateway）照這個格式呼叫即可，**呼叫端怎麼設定不在本專案範圍內**。欄位格式來自 LiteLLM 1.92.0 的 `generic_guardrail_api`，已對照原始碼。
+server 採 generic guardrail API 協定。呼叫端（gateway）照這個格式呼叫即可，**呼叫端怎麼設定不在本專案範圍內**。欄位格式來自 LiteLLM 1.98.1 的 `generic_guardrail_api`，已對照原始碼。
 
 | 項目 | 行為 |
 |---|---|

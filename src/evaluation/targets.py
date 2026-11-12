@@ -5,6 +5,9 @@
                         ``POST /v1/classify`` (per-stage verdicts and scores); ``endpoint: guardrail_api``
                         uses the production endpoint ``POST /beta/litellm_basic_guardrail_api`` exactly as
                         production traffic does (decision only).
+``http_guardrail``      ANY guardrail service over HTTP, through an adapter (``src/evaluation/adapters.py``).
+                        The default adapter speaks the LiteLLM generic guardrail API; another service
+                        needs only its own adapter. Supports ``input_type: request | response``.
 ``inprocess``           the same ``GuardPipeline`` built in this process from server YAML — no server to
                         start, handy for quick threshold / prompt sweeps during development.
 ======================  ===========================================================================
@@ -46,6 +49,11 @@ class Prediction:
     raw: str | None = None
     shadow_stages: list[str] = field(default_factory=list)  # in stage_unsafe for analysis, never deciding
     shadow_errors: list[str] = field(default_factory=list)
+    # normalized LiteLLM-style result (http_guardrail)
+    input_type: str = "request"
+    texts: list[str] | None = None
+    texts_changed: bool | None = None  # GUARDRAIL_INTERVENED: did the returned text actually differ?
+    blocked_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -325,6 +333,155 @@ class GuardrailServerTarget(_HTTPTarget):
         if r.status_code >= 500 or r.status_code in (408, 429):
             raise TargetError(f"HTTP {r.status_code}: {r.text[:200]}")  # retried by the runner
         r.raise_for_status()
+
+
+@TARGETS.register("http_guardrail")
+class HTTPGuardrailTarget(_HTTPTarget):
+    """Any guardrail service over HTTP via an adapter (default: the LiteLLM generic guardrail API)."""
+
+    name = "http_guardrail"
+    section = "http_guardrail"
+    CANARY = GuardrailServerTarget.CANARY
+
+    def __init__(self, cfg: dict[str, Any]):
+        from .adapters import INPUT_TYPES, build_adapter
+
+        self.adapter = build_adapter((get_by_path(cfg, "target.http_guardrail", {}) or {}).get("adapter"))
+        super().__init__(cfg)  # needs the adapter for headers()
+        self.input_type = self.tcfg.get("input_type", "request")
+        if self.input_type not in INPUT_TYPES:
+            raise ValueError(f"target.http_guardrail.input_type must be one of {INPUT_TYPES}, got {self.input_type!r}")
+        self.max_raw = int(self.tcfg.get("save_chars", 4000))
+        # optional: an endpoint where the service describes itself (version, models, thresholds ...)
+        self.info_path: str | None = self.tcfg.get("info_path")
+        self.info_required = bool(self.tcfg.get("info_required", False))
+        self.info_ignore = set(self.tcfg.get("info_ignore_keys", self.INFO_VOLATILE_KEYS))
+        self.server_info: dict[str, Any] | None = None
+        self.server_info_end: dict[str, Any] | None = None
+
+    #: keys of the info document that change without the guardrail changing (not part of its identity)
+    INFO_VOLATILE_KEYS = ("started_at", "start_time", "uptime", "uptime_s", "uptime_seconds", "timestamp", "time",
+                          "now", "stats", "request_count", "requests", "hostname", "pid")
+
+    def headers(self) -> dict[str, str]:
+        return {**self.adapter.auth_headers(self.api_key), **(self.tcfg.get("headers") or {})}
+
+    async def _fetch_info(self) -> dict[str, Any]:
+        """GET ``info_path``. Whatever JSON the service returns is stored as is; a failure is recorded, and
+        only aborts the run with ``info_required: true``."""
+        assert self.client is not None and self.info_path
+        try:
+            r = await self.client.get(self.info_path)
+            r.raise_for_status()
+            body = r.json()
+            return body if isinstance(body, dict) else {"value": body}
+        except Exception as e:  # noqa: BLE001 - the info endpoint is metadata, not the thing under test
+            if self.info_required:
+                raise RuntimeError(f"could not read the guardrail info from {self.base_url}{self.info_path}: "
+                                   f"{type(e).__name__}: {e}") from e
+            return {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    def identity(self, info: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The part of the info that says WHICH guardrail this is (volatile keys dropped, at any depth)."""
+        def strip(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: strip(v) for k, v in obj.items() if k not in self.info_ignore}
+            return [strip(v) for v in obj] if isinstance(obj, list) else obj
+
+        return None if not info or "error" in info else strip(info)
+
+    @property
+    def server_changed(self) -> bool | None:
+        """True: the info differs between the start and the end of the run (redeployed / reconfigured while
+        it was being evaluated). None: could not be verified."""
+        a, b = self.identity(self.server_info), self.identity(self.server_info_end)
+        return None if a is None or b is None else a != b
+
+    def select(self, samples: list[EvalSample]) -> list[EvalSample]:
+        """Response direction judges model answers: only rows that carry one can be scored."""
+        if self.input_type != "response":
+            return samples
+        kept = [s for s in samples if s.response is not None]
+        if not kept:
+            raise ValueError("input_type=response needs data with a `response` column (prompt,expected,response)")
+        return kept
+
+    async def startup(self) -> None:
+        await super().startup()
+        if self.info_path:
+            self.server_info = await self._fetch_info()
+        if self.tcfg.get("canary", True):
+            await self._canary()
+
+    async def shutdown(self) -> None:
+        if self.info_path and self.client is not None and self.server_info is not None:
+            self.server_info_end = await self._safe_info()
+        await super().shutdown()
+
+    async def _safe_info(self) -> dict[str, Any]:
+        try:
+            return await self._fetch_info()
+        except RuntimeError as e:   # the run is over: report, do not raise
+            return {"error": str(e)[:300]}
+
+    async def _canary(self) -> None:
+        text = self.tcfg.get("canary_text", self.CANARY)
+        try:
+            pred = await self.predict(EvalSample.build(text, "block", "canary", "canary", response=text))
+        except TargetError as e:
+            raise RuntimeError(f"guardrail service at {self.base_url} did not answer the canary request ({e})") from e
+        if pred.error:
+            raise RuntimeError(f"guardrail service at {self.base_url} answered the canary with an error: {pred.error}")
+        if not pred.unsafe:
+            raise RuntimeError(f"canary text was NOT blocked (action={pred.action}): wrong service / config, or it is "
+                               "failing open. Refusing to report numbers (set target.http_guardrail.canary: false, or "
+                               "canary_text to something this service must block).")
+
+    def describe(self) -> dict[str, Any]:
+        out = {**super().describe(), "adapter": self.adapter.describe(), "input_type": self.input_type}
+        if self.info_path:   # same keys as the guardrail_server target: resume checks and warnings are shared
+            out.update(server_info=self.server_info, server_identity=self.identity(self.server_info))
+            if self.server_info_end is not None:
+                out.update(server_info_end=self.server_info_end, server_changed_during_run=self.server_changed)
+        return out
+
+    async def predict(self, s: EvalSample) -> Prediction:
+        from .adapters import AdapterParseError
+
+        assert self.client is not None, "startup() not called"
+        req = self.adapter.build_request(s, self.input_type)
+        t0 = time.perf_counter()
+        try:
+            r = await self.client.request(req.method, req.path, json=req.json, headers=req.headers or None)
+        except httpx.TransportError as e:
+            raise TargetError(f"{type(e).__name__}: {e}") from e
+        ms = (time.perf_counter() - t0) * 1000
+        try:
+            body: Any = r.json()
+        except ValueError:
+            body = None
+        if not r.is_success:
+            if self.adapter.is_retryable(r.status_code, body):
+                raise TargetError(f"HTTP {r.status_code}: {r.text[:200]}")
+            return Prediction(s.sample_id, unsafe=None, latency_ms=ms, input_type=self.input_type,
+                              error=f"HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            res = self.adapter.parse_response(r.status_code, r.headers, body)
+        except AdapterParseError as e:
+            return Prediction(s.sample_id, unsafe=None, latency_ms=ms, input_type=self.input_type, parse_ok=False,
+                              error=f"protocol error: {e}", raw=r.text[: self.max_raw] if self.save_raw else None)
+        sent = req.json.get("texts") if isinstance(req.json, dict) else None
+        changed = None
+        if res.action == "GUARDRAIL_INTERVENED":
+            changed = res.texts is not None and res.texts != (sent or [self.adapter.judged_text(s, self.input_type)])
+        raw = None
+        if self.save_raw and res.raw is not None:
+            import json as _json
+
+            raw = (res.raw if isinstance(res.raw, str) else _json.dumps(res.raw, ensure_ascii=False))[: self.max_raw]
+        return Prediction(s.sample_id, unsafe=res.action == "BLOCKED", score=res.score, categories=list(res.categories),
+                          action=res.action, latency_ms=ms, raw=raw, input_type=self.input_type, texts=res.texts,
+                          texts_changed=changed, blocked_reason=res.blocked_reason)
 
 
 def build_target(cfg: dict[str, Any]) -> Target:

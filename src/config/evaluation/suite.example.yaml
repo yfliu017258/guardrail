@@ -1,0 +1,33 @@
+# What you evaluate, in one place. Copy to suite.yaml, edit, then:
+#   python -m src.evaluation.suite suite.yaml            # runs only what has no completed run yet
+#   python -m src.evaluation.suite suite.yaml --max-samples 50   # quick functional check
+#   scripts/run_experiments.sh start                     # unattended: background, log, resume + retry
+# Add a guardrail / model / dataset = add one entry below and run the same command again.
+
+results: results          # where every run directory goes
+# max_samples: 200        # at most this many samples per dataset (omit for the full datasets); seeded and
+#                         # stratified by expected, so every guardrail and model is tested on the same rows
+# concurrency: 16
+
+datasets:                 # name: CSV file, directory (a mix) or glob
+  core_v1: processed_data/mixes/core_v1/
+  # neuralchemy: {path: processed_data/neuralchemy_pi.csv, max_samples: 500}   # a cap for this dataset only
+  # response-direction data (prompt,expected,response; see `python -m src.analysis.responses`):
+  # answers_qwen: {path: processed_data/responses/qwen.csv, input_type: response}
+
+guardrails:               # services that speak the LiteLLM generic guardrail API
+  my-guardrail:
+    url: http://my-guardrail:8080
+    api_key_env: GUARDRAIL_SERVICE_API_KEY      # name of the variable in .env (sent as x-api-key); omit for no auth
+    # canary_text: "..."                        # a text this service must block, if not prompt injection
+    # info_path: /v1/info                       # the service's info endpoint: stored with every run
+    # datasets: [core_v1]                       # default: every dataset
+  # my-guardrail-strict:
+  #   url: http://my-guardrail-strict:8080
+
+models:                   # bare models behind LiteLLM (LITELLM_BASE_URL / LITELLM_API_KEY in .env)
+  qwen3.6-27b: {}         # the entry name is the LiteLLM model alias (or set `model: <alias>`)
+  # glm-5.3-flash: {max_tokens: 2048}
+
+judge:                    # refusal judge for the model runs (Qwen3Guard-Gen through LiteLLM)
+  model: qwen3guard

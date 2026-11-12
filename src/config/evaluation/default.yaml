@@ -5,7 +5,8 @@ run:
   output_dir: results
 
 env_passthrough: [GUARDRAIL_API_KEY, GUARDRAIL_SERVER_URL, GUARD_MODEL_BASE_URL, VLLM_API_KEY, HF_TOKEN,
-                  MODEL_BASE_URL, MODEL_API_KEY, JUDGE_BASE_URL, JUDGE_API_KEY]
+                  MODEL_BASE_URL, MODEL_API_KEY, JUDGE_BASE_URL, JUDGE_API_KEY,
+                  GUARDRAIL_SERVICE_URL, GUARDRAIL_SERVICE_API_KEY, LITELLM_BASE_URL, LITELLM_API_KEY]
 
 task:
   type: guardrail            # guardrail | model_safety | refusal_judge   (python -m src.evaluation --list)
@@ -22,7 +23,7 @@ data:
   # duplicates (same sample_id) are always dropped: predictions are keyed by sample_id
 
 target:
-  type: guardrail_server      # guardrail_server (a running server) | inprocess (same pipeline, no server)
+  type: guardrail_server      # guardrail_server (this repo's server) | http_guardrail (any service) | inprocess
   guardrail_server:
     base_url: null            # explicit URL (--server-url) wins over base_url_env, which wins over default_base_url
     base_url_env: GUARDRAIL_SERVER_URL
@@ -33,6 +34,15 @@ target:
     run_all: true             # classify: run every stage (no short-circuit) -> per-stage metrics
     stages: null              # classify: restrict to these stage names
     canary: true              # a known injection must be BLOCKED at startup, else abort (wrong config / fail-open)
+  http_guardrail:             # any guardrail service, through an adapter (see guardrail_service.yaml)
+    adapter: {type: generic_guardrail_api}   # the service speaks the LiteLLM generic guardrail API
+    base_url: null            # --service-url
+    base_url_env: GUARDRAIL_SERVICE_URL
+    api_key_env: GUARDRAIL_SERVICE_API_KEY
+    input_type: request       # request: judge the prompt | response: judge the `response` column
+    canary: true
+    info_path: null           # e.g. /v1/info: the service's self-description, stored with the run (start + end)
+    info_required: false      # true: abort when the info cannot be read
   inprocess:
     server_config: [src/config/server/default.yaml]
     overrides: []             # dotted overrides applied to the server config
