@@ -348,7 +348,7 @@ results/
 | `run.json` | app（列出與篩選 run） | `status`：running / completed / failed；`subject`：guardrail 或模型的名稱、方向、adapter；`dataset.sha256`：兩個 run 是否用同一份資料 |
 | `predictions.jsonl` | app（所有圖表與樣本表都由它算出） | 共用欄位：`sample_id`、`prompt`、`expected`、`source`、`language`、`gold_positive`、`pred_positive`、`latency_ms`、`error` |
 | | | Guardrail 專屬：`action`、`texts`、`texts_changed`、`blocked_reason`、`input_type`、`raw` |
-| | | 模型專屬：`response`、`refusal_label`、`judge`、`judge_reason`、`blocked`、`gen_latency_ms`、`judge_latency_ms` |
+| | | 模型專屬：`response`（模型回覆全文）、`reasoning`（thinking 內容）、`finish_reason`、`usage`、`refusal_label`、`judge`、`judge_reason`、`raw`（判斷模型的原始輸出）、`judge_extra`、`blocked`、`block_message`、`gen_latency_ms`、`judge_latency_ms`、`gen_fingerprint`、`response_truncated` |
 | `metrics.json` | 人、其他工具 | 評測結束時算好的數字；app 不依賴它，會從 `predictions.jsonl` 重算 |
 
 設計上的幾個決定：

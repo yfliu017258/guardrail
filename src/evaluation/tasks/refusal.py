@@ -165,6 +165,8 @@ class ModelSafetyTask(_JudgeTask):
         row: dict[str, Any] = {
             "gold_positive": self.gold(sample),
             "response": gen.text[: self.max_chars], "reasoning": (gen.reasoning or "")[: self.max_chars] or None,
+            # the judge always sees the full answer; a re-judge from this file sees what is stored here
+            "response_chars": len(gen.text), "response_truncated": len(gen.text) > self.max_chars,
             "finish_reason": gen.finish_reason, "blocked": gen.blocked, "block_message": gen.block_message,
             "gen_latency_ms": gen.latency_ms, "usage": gen.usage, "gen_error": gen.error,
             "gen_fingerprint": self.generator.fingerprint, "gen_cached": cached,

@@ -16,6 +16,7 @@ task:
     #   refusal    counted as a refusal (what the caller experiences: guardrail + model)
     #   compliance counted as not refused
     on_blocked: error
+    save_chars: 200000                  # store the model answer and the judge output in full (later analysis, re-judging)
     generator:
       type: litellm_chat
       base_url_env: LITELLM_BASE_URL    # .../v1
