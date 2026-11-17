@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 KEY_FILES = [
     "src/evaluation/adapters.py", "src/evaluation/targets.py", "src/evaluation/tasks/guardrail.py",
     "src/evaluation/tasks/refusal.py", "src/evaluation/generation.py", "src/evaluation/runner.py",
-    "src/evaluation/suite.py", "src/evaluation/dataset.py", "src/refuse_judge/guard.py", "src/analysis/loader.py",
+    "src/evaluation/suite.py", "src/evaluation/dataset.py", "src/evaluation/__main__.py", "src/refuse_judge/guard.py",
+    "src/analysis/loader.py", "src/analysis/app.py",
     "src/config/evaluation/guardrail_service.yaml", "src/config/evaluation/model_safety_litellm.yaml",
     "src/config/evaluation/suite.example.yaml",
 ]

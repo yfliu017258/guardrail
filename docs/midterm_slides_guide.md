@@ -23,8 +23,8 @@ python -m src.analysis.report_context --results results/ -o report_context.md
 | 你的模型環境 | 做法 |
 |---|---|
 | 能讀 repo 檔案（coding agent、IDE 外掛） | 把第二部分貼給它，並告訴它 repo 路徑和 `report_context.md` 的位置 |
-| 只能貼文字（聊天介面） | 加上 `--with-code` 重新產生：`python -m src.analysis.report_context --results results/ -o report_context.md --with-code`，把關鍵程式碼一起附在檔案裡（約 11 萬字元），連同第二部分一起貼上 |
-| context 放不下 11 萬字元 | 分兩輪：第一輪貼第二部分 + 不含程式碼的 `report_context.md`，產生第 5–8 節（結果）；第二輪貼第二部分 + 個別程式檔，產生第 3–4 節（方法） |
+| 只能貼文字（聊天介面） | 加上 `--with-code` 重新產生：`python -m src.analysis.report_context --results results/ -o report_context.md --with-code`，把關鍵程式碼一起附在檔案裡（約 16 萬字元），連同第二部分一起貼上 |
+| context 放不下 16 萬字元 | 分兩輪：第一輪貼第二部分 + 不含程式碼的 `report_context.md`，產生第 5–8 節（結果）；第二輪貼第二部分 + 個別程式檔，產生第 3–4 節（方法） |
 
 ### 3. 你要自己補的內容
 
