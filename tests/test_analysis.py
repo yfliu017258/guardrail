@@ -122,3 +122,13 @@ def test_service_info_table():
     assert list(diff["設定"]) == ["extra", "model", "stages.0.threshold"] and list(diff.columns) == ["設定", "a", "b"]
     assert len(L.info_table([a, b], only_differences=False)) == 5
     assert L.flatten({"x": {"y": [1, 2]}}) == {"x.y": [1, 2]}
+
+
+def test_report_context_lists_runs_and_combinations(results):
+    from src.analysis.report_context import build
+
+    text = build(str(results))
+    assert "guard-full" in text and "mock-model" in text and "（無 guardrail）" in text
+    s = L.summarize(_by_name(results)["guard-full"].rows)
+    assert f"{s['recall'] * 100:.1f}%" in text                               # numbers come from the same maths as the app
+    assert "## 5. 關鍵程式碼" not in text and "class GuardrailAdapter" in build(str(results), with_code=True)
